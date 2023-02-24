@@ -58,7 +58,7 @@ func main() {
 		for sc.Scan() {
 			mbid := sc.Text()
 			if err := rewriteURL(ctx, mbid, api, ed); err != nil {
-				log.Fatalf("Failed rewriting %q: %v", mbid, err)
+				log.Printf("Failed rewriting %q: %v", mbid, err)
 			}
 		}
 		if err := sc.Err(); err != nil {
