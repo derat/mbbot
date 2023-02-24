@@ -6,6 +6,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -33,14 +35,21 @@ type testEnv struct {
 
 	mbidURLs map[string]string // MBID-to-URL mappings for API
 	edits    []edit
+
+	origLogDest io.Writer
 }
 
 func newTestEnv(ctx context.Context, t *testing.T) *testEnv {
 	env := testEnv{
-		t:        t,
-		mux:      http.NewServeMux(),
-		mbidURLs: make(map[string]string),
+		t:           t,
+		mux:         http.NewServeMux(),
+		mbidURLs:    make(map[string]string),
+		origLogDest: log.Writer(),
 	}
+
+	// Hide spammy logs.
+	log.SetOutput(io.Discard)
+
 	env.mux.HandleFunc("/login", env.handleLogin)
 	env.mux.HandleFunc("/ws/2/url/", env.handleAPIURL)
 	env.mux.HandleFunc("/", env.handleDefault)
@@ -67,6 +76,7 @@ func newTestEnv(ctx context.Context, t *testing.T) *testEnv {
 
 func (env *testEnv) close() {
 	env.srv.Close()
+	log.SetOutput(env.origLogDest)
 }
 
 func (env *testEnv) handleLogin(w http.ResponseWriter, req *http.Request) {
