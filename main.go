@@ -6,6 +6,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -104,10 +105,19 @@ func rewriteURL(ctx context.Context, mbid string, api *api, ed *editor) error {
 	}
 
 	log.Printf("%v: rewriting %v to %v", mbid, orig, res.updated)
-	return ed.post(ctx, "/url/"+mbid+"/edit", map[string]string{
+	b, err := ed.post(ctx, "/url/"+mbid+"/edit", map[string]string{
 		"edit-url.url":       res.updated,
 		"edit-url.edit_note": res.editNote,
 	})
+	if err != nil {
+		return err
+	}
+	if ms := ed.editIDRegexp.FindStringSubmatch(string(b)); ms == nil {
+		return errors.New("didn't find edit ID")
+	} else {
+		log.Printf("%v: created edit #%s", mbid, ms[1])
+	}
+	return nil
 }
 
 // rewriteFunc accepts the match groups returned by FindStringSubmatch and returns a non-nil result.

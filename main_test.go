@@ -19,11 +19,11 @@ import (
 )
 
 const (
-	testUser = "someuser"
-	testPass = "secret123"
-
-	sessionCookie = "musicbrainz_server_session"
-	testSession   = "deadbeef"
+	testUser           = "someuser"
+	testPass           = "secret123"
+	testSession        = "67d6e3af345531d14024e065dda8edc762c62bfd"
+	testCSRFSessionKey = "csrf_token:yDxVoERSSn3myMFAXK0obEZaJRjliGnPtp+Cyfz5Eek="
+	testCSRFToken      = "WX6VYHNb7TEaBTgPwLjU9jkJS4/TpJu/b6EKrIpK+n0="
 )
 
 type testEnv struct {
@@ -80,19 +80,60 @@ func (env *testEnv) close() {
 }
 
 func (env *testEnv) handleLogin(w http.ResponseWriter, req *http.Request) {
-	user := req.FormValue("username")
-	pass := req.FormValue("password")
-	if user != testUser || pass != testPass {
-		env.t.Errorf("Login attempt as %v/%v; want %v/%v", user, pass, testUser, testPass)
-		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
-		return
-	}
-
 	http.SetCookie(w, &http.Cookie{
 		Name:  sessionCookie,
 		Value: testSession,
 		Path:  "/",
 	})
+
+	switch req.Method {
+	case http.MethodGet:
+		// Return a minimal page with a form with CSRF-related inputs.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+  <head><title>MusicBrainz</title></head>
+  <body>
+    <form action="/login" method="post">
+      <input name="csrf_session_key" type="hidden" value="%s"/>
+      <input name="csrf_token" type="hidden" value="%s"/>
+    </form>
+  </body>
+</html>`, testCSRFSessionKey, testCSRFToken)
+
+	case http.MethodPost:
+		user := req.FormValue("username")
+		pass := req.FormValue("password")
+		if user != testUser || pass != testPass {
+			env.t.Errorf("Login attempt as %v/%v; want %v/%v", user, pass, testUser, testPass)
+			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+			return
+		}
+
+		if v := req.FormValue("csrf_session_key"); v != testCSRFSessionKey {
+			env.t.Errorf("Login attempt with csrf_session_key %q; want %q", v, testCSRFSessionKey)
+			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+			return
+		}
+		if v := req.FormValue("csrf_token"); v != testCSRFToken {
+			env.t.Errorf("Login attempt with csrf_token %q; want %q", v, testCSRFToken)
+			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+			return
+		}
+
+		// Return a minimal page with the profile link that the editor code looks
+		// for to check whether login was successful.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+  <head><title>MusicBrainz</title></head>
+  <body><a href="/user/%s">Profile</a></body>
+</html>`, testUser)
+
+	default:
+		env.t.Errorf("Unexpected %v login request", req.Method)
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+	}
 }
 
 func (env *testEnv) handleDefault(w http.ResponseWriter, req *http.Request) {
@@ -111,6 +152,16 @@ func (env *testEnv) handleDefault(w http.ResponseWriter, req *http.Request) {
 	u.Scheme = ""
 	u.Host = ""
 	env.edits = append(env.edits, edit{u.String(), req.PostForm})
+
+	// Write a simple page containing an arbitrary edit ID.
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+  <head><title>MusicBrainz</title></head>
+  <body>
+    <p>Thank you, your <a href="%s/edit/123">edit</a> (#123) has been entered into the edit queue for peer review.</p>
+  </body>
+</html>`, env.srv.URL)
 }
 
 func (env *testEnv) handleAPIURL(w http.ResponseWriter, req *http.Request) {
