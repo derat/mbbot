@@ -60,6 +60,7 @@ func (ed *editor) post(ctx context.Context, path string, vals map[string]string)
 	if err != nil {
 		return err
 	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	for _, c := range ed.jar.Cookies(req.URL) {
 		req.AddCookie(c)
 	}

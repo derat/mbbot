@@ -104,10 +104,10 @@ func rewriteURL(ctx context.Context, mbid string, api *api, ed *editor) error {
 	}
 
 	log.Printf("%v: rewriting %v to %v", mbid, orig, res.updated)
-
-	// TODO: Actually post the edit.
-
-	return nil
+	return ed.post(ctx, "/url/"+mbid+"/edit", map[string]string{
+		"edit-url.url":       res.updated,
+		"edit-url.edit_note": res.editNote,
+	})
 }
 
 // rewriteFunc accepts the match groups returned by FindStringSubmatch and returns a non-nil result.
@@ -118,6 +118,8 @@ type rewriteResult struct {
 	editNote string // https://musicbrainz.org/doc/Edit_Note
 }
 
+const tidalURLEditNote = "normalize Tidal streaming URLs"
+
 var urlRewrites = map[*regexp.Regexp]rewriteFunc{
 	// Normalize Tidal streaming URLs:
 	//  https://listen.tidal.com/album/114997210 -> https://tidal.com/album/114997210
@@ -126,6 +128,6 @@ var urlRewrites = map[*regexp.Regexp]rewriteFunc{
 	//  https://tidal.com/browse/artist/5015356  -> https://tidal.com/artist/5015356
 	//  https://tidal.com/browse/track/120087531 -> https://tidal.com/track/120087531
 	regexp.MustCompile(`^https?://(?:listen\.tidal\.com|tidal\.com/browse)(/(?:album|artist|track)/\d+)$`): func(ms []string) *rewriteResult {
-		return &rewriteResult{"https://tidal.com" + ms[1], "normalize Tidal streaming URLs"}
+		return &rewriteResult{"https://tidal.com" + ms[1], tidalURLEditNote}
 	},
 }
