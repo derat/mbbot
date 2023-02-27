@@ -113,7 +113,7 @@ func (ed *editor) send(ctx context.Context, method, path string, vals map[string
 		}
 		if ed.dryRun {
 			log.Printf("POST %v with body %q", u, form.Encode())
-			return nil, nil
+			return []byte(ed.serverURL + "/edit/0"), nil // matched by editIDRegexp
 		}
 		body = strings.NewReader(form.Encode())
 	}
