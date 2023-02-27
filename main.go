@@ -128,7 +128,7 @@ type rewriteResult struct {
 	editNote string // https://musicbrainz.org/doc/Edit_Note
 }
 
-const tidalURLEditNote = "normalize Tidal streaming URLs"
+const tidalURLEditNote = "normalize Tidal streaming URLs: https://tickets.metabrainz.org/browse/MBBE-71"
 
 var urlRewrites = map[*regexp.Regexp]rewriteFunc{
 	// Normalize Tidal streaming URLs:
