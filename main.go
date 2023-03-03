@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
@@ -56,14 +57,16 @@ func main() {
 	switch *action {
 	case actionURLs:
 		sc := bufio.NewScanner(os.Stdin)
-		for sc.Scan() {
-			mbid := sc.Text()
+		for {
+			mbid, err := readMBID(sc)
+			if err == io.EOF {
+				break
+			} else if err != nil {
+				log.Fatal("Failed reading MBID: ", err)
+			}
 			if err := rewriteURL(ctx, mbid, api, ed); err != nil {
 				log.Printf("Failed rewriting %q: %v", mbid, err)
 			}
-		}
-		if err := sc.Err(); err != nil {
-			log.Fatal("Failed reading MBIDs: ", err)
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "Invalid action %q\n", *action)
@@ -83,6 +86,35 @@ func readCreds(p string) (user, pass string, err error) {
 	}
 	return parts[0], parts[1], nil
 }
+
+// readLine reads the next line from sc.
+// If an error was encountered (possibly during an earlier read), it is returned.
+// After all lines have been read successfully, io.EOF is returned.
+func readLine(sc *bufio.Scanner) (string, error) {
+	if sc.Scan() {
+		return sc.Text(), nil
+	}
+	if err := sc.Err(); err != nil {
+		return "", err
+	}
+	return "", io.EOF
+}
+
+// readMBID is a wrapper around readLine that checks that lines contain valid UUIDs.
+func readMBID(sc *bufio.Scanner) (string, error) {
+	ln, err := readLine(sc)
+	if err != nil {
+		return "", err
+	}
+	if !mbidRegexp.MatchString(ln) {
+		return "", fmt.Errorf("invalid MBID %q", ln)
+	}
+	return ln, nil
+}
+
+// mbidRegexp matches a MusicBrainz ID (i.e. a UUID).
+var mbidRegexp = regexp.MustCompile(
+	`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // rewriteURL attempts to rewrite the URL with the specified MBID.
 // If no rewrite is performed, a nil error is returned.
