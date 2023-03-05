@@ -34,7 +34,7 @@ type testEnv struct {
 	ed  *editor
 
 	mbidURLs map[string]string // MBID-to-URL mappings for API
-	edits    []edit
+	requests []request         // POST requests sent to server
 
 	origLogDest io.Writer
 }
@@ -151,9 +151,10 @@ func (env *testEnv) handleDefault(w http.ResponseWriter, req *http.Request) {
 	u := req.URL
 	u.Scheme = ""
 	u.Host = ""
-	env.edits = append(env.edits, edit{u.String(), req.PostForm})
+	env.requests = append(env.requests, request{u.String(), req.PostForm})
 
 	// Write a simple page containing an arbitrary edit ID.
+	// TODO: Maybe return something different for cancel requests? It doesn't matter at the moment.
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<!DOCTYPE html>
 <html>
@@ -180,20 +181,48 @@ func (env *testEnv) handleAPIURL(w http.ResponseWriter, req *http.Request) {
 </metadata>`, mbid, url)
 }
 
-// edit describes a request that was posted to the server.
-type edit struct {
+// request describes a request that was posted to the server.
+type request struct {
 	path   string
 	params url.Values
 }
 
-// urlEdit constructs an edit for changing a URL.
-func urlEdit(mbid, newURL, editNote string) edit {
-	return edit{
+// cancelRequest constructs a request for canceling an edit.
+func cancelRequest(id int, editNote string) request {
+	return request{
+		path: fmt.Sprintf("/edit/%d/cancel", id),
+		params: url.Values{
+			"confirm.edit_note": []string{editNote},
+		},
+	}
+}
+
+// urlRequest constructs a request for changing a URL.
+func urlRequest(mbid, newURL, editNote string) request {
+	return request{
 		path: "/url/" + mbid + "/edit",
 		params: url.Values{
 			"edit-url.url":       []string{newURL},
 			"edit-url.edit_note": []string{editNote},
 		},
+	}
+}
+
+func TestCancelEdit(t *testing.T) {
+	ctx := context.Background()
+	env := newTestEnv(ctx, t)
+	defer env.close()
+
+	const (
+		id       = 123
+		editNote = "testing edit cancelation"
+	)
+	if err := cancelEdit(ctx, env.ed, id, editNote); err != nil {
+		t.Fatalf("cancelEdit(ctx, ed, %d, %q) failed: %v", id, editNote, err)
+	}
+	want := []request{cancelRequest(id, editNote)}
+	if diff := cmp.Diff(want, env.requests, cmp.AllowUnexported(request{})); diff != "" {
+		t.Error("Bad requests:\n" + diff)
 	}
 }
 
@@ -213,15 +242,15 @@ func TestRewriteURL(t *testing.T) {
 	env.mbidURLs[mbid3] = "https://tidal.com/album/1234" // already normalized
 
 	for _, mbid := range []string{mbid1, mbid2, mbid3} {
-		if err := rewriteURL(ctx, mbid, env.api, env.ed); err != nil {
-			t.Errorf("rewriteURL(ctx, %q, api, ed) failed: %v", mbid, err)
+		if err := rewriteURL(ctx, env.api, env.ed, mbid, ""); err != nil {
+			t.Errorf("rewriteURL(ctx, api, ed, %q, %q) failed: %v", mbid, "", err)
 		}
 	}
-	want := []edit{
-		urlEdit(mbid1, "https://tidal.com/artist/11069", tidalURLEditNote),
-		urlEdit(mbid2, "https://tidal.com/album/11103031", tidalURLEditNote),
+	want := []request{
+		urlRequest(mbid1, "https://tidal.com/artist/11069", tidalURLEditNote),
+		urlRequest(mbid2, "https://tidal.com/album/11103031", tidalURLEditNote),
 	}
-	if diff := cmp.Diff(want, env.edits, cmp.AllowUnexported(edit{})); diff != "" {
-		t.Error("Bad edits:\n" + diff)
+	if diff := cmp.Diff(want, env.requests, cmp.AllowUnexported(request{})); diff != "" {
+		t.Error("Bad requests:\n" + diff)
 	}
 }

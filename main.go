@@ -19,10 +19,12 @@ import (
 )
 
 const (
-	actionURLs = "urls" // rewrite URLs corresponding to MBIDs read from stdin
+	actionCancel = "cancel" // cancel edits with IDs read from stdin
+	actionURLs   = "urls"   // rewrite URLs corresponding to MBIDs read from stdin
 )
 
 var allActions = []string{
+	actionCancel,
 	actionURLs,
 }
 
@@ -30,11 +32,16 @@ func main() {
 	action := flag.String("action", "", "Action to perform ("+strings.Join(allActions, ", ")+")")
 	creds := flag.String("creds", filepath.Join(os.Getenv("HOME"), ".mbbot"), "Path to file containing username and password")
 	dryRun := flag.Bool("dry-run", false, "Don't actually perform any edits")
+	editNote := flag.String("edit-note", "", "Edit note to attach to all edits")
 	server := flag.String("server", "https://test.musicbrainz.org", "Base URL of MusicBrainz server")
 	flag.Parse()
 
+	// Validate the action before we bother logging in.
 	if *action == "" {
 		fmt.Fprintln(os.Stderr, "Must supply action via -action")
+		os.Exit(2)
+	} else if !sliceContains(allActions, *action) {
+		fmt.Fprintf(os.Stderr, "Invalid action %q\n", *action)
 		os.Exit(2)
 	}
 
@@ -55,22 +62,28 @@ func main() {
 	ed.dryRun = *dryRun
 
 	switch *action {
+	case actionCancel:
+		sc := bufio.NewScanner(os.Stdin)
+		for {
+			if id, err := readInt(sc); err == io.EOF {
+				break
+			} else if err != nil {
+				log.Fatal("Failed reading edit ID: ", err)
+			} else if err := cancelEdit(ctx, ed, id, *editNote); err != nil {
+				log.Printf("Failed canceling edit %v: %v", id, err)
+			}
+		}
 	case actionURLs:
 		sc := bufio.NewScanner(os.Stdin)
 		for {
-			mbid, err := readMBID(sc)
-			if err == io.EOF {
+			if mbid, err := readMBID(sc); err == io.EOF {
 				break
 			} else if err != nil {
 				log.Fatal("Failed reading MBID: ", err)
-			}
-			if err := rewriteURL(ctx, mbid, api, ed); err != nil {
+			} else if err := rewriteURL(ctx, api, ed, mbid, *editNote); err != nil {
 				log.Printf("Failed rewriting %q: %v", mbid, err)
 			}
 		}
-	default:
-		fmt.Fprintf(os.Stderr, "Invalid action %q\n", *action)
-		os.Exit(2)
 	}
 }
 
@@ -87,38 +100,19 @@ func readCreds(p string) (user, pass string, err error) {
 	return parts[0], parts[1], nil
 }
 
-// readLine reads the next line from sc.
-// If an error was encountered (possibly during an earlier read), it is returned.
-// After all lines have been read successfully, io.EOF is returned.
-func readLine(sc *bufio.Scanner) (string, error) {
-	if sc.Scan() {
-		return sc.Text(), nil
-	}
-	if err := sc.Err(); err != nil {
-		return "", err
-	}
-	return "", io.EOF
+// cancelEdit cancels the MusicBrainz edit with the supplied ID.
+func cancelEdit(ctx context.Context, ed *editor, id int, editNote string) error {
+	log.Printf("Canceling edit %d", id)
+	_, err := ed.post(ctx, fmt.Sprintf("/edit/%d/cancel", id), map[string]string{
+		"confirm.edit_note": editNote,
+	})
+	return err
 }
-
-// readMBID is a wrapper around readLine that checks that lines contain valid UUIDs.
-func readMBID(sc *bufio.Scanner) (string, error) {
-	ln, err := readLine(sc)
-	if err != nil {
-		return "", err
-	}
-	if !mbidRegexp.MatchString(ln) {
-		return "", fmt.Errorf("invalid MBID %q", ln)
-	}
-	return ln, nil
-}
-
-// mbidRegexp matches a MusicBrainz ID (i.e. a UUID).
-var mbidRegexp = regexp.MustCompile(
-	`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // rewriteURL attempts to rewrite the URL with the specified MBID.
+// If editNote is non-empty, it will be attached to the edit.
 // If no rewrite is performed, a nil error is returned.
-func rewriteURL(ctx context.Context, mbid string, api *api, ed *editor) error {
+func rewriteURL(ctx context.Context, api *api, ed *editor, mbid, editNote string) error {
 	orig, err := api.getURL(ctx, mbid)
 	if err != nil {
 		return fmt.Errorf("failed getting URL: %v", err)
@@ -134,6 +128,10 @@ func rewriteURL(ctx context.Context, mbid string, api *api, ed *editor) error {
 	if res == nil {
 		log.Printf("%v: no rewrites found for %v", mbid, orig)
 		return nil
+	}
+
+	if editNote != "" {
+		res.editNote = editNote
 	}
 
 	log.Printf("%v: rewriting %v to %v", mbid, orig, res.updated)
