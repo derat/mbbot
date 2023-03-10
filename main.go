@@ -118,13 +118,7 @@ func rewriteURL(ctx context.Context, api *api, ed *editor, mbid, editNote string
 		return fmt.Errorf("failed getting URL: %v", err)
 	}
 
-	var res *rewriteResult
-	for re, fn := range urlRewrites {
-		if ms := re.FindStringSubmatch(orig); ms != nil {
-			res = fn(ms)
-			break
-		}
-	}
+	res := doRewrite(urlRewrites, orig)
 	if res == nil {
 		log.Printf("%v: no rewrites found for %v", mbid, orig)
 		return nil
@@ -150,6 +144,21 @@ func rewriteURL(ctx context.Context, api *api, ed *editor, mbid, editNote string
 	return nil
 }
 
+// doRewrite looks for an appropriate rewrite for orig.
+// If orig isn't matched by a rewrite or is unchanged after rewriting, nil is returned.
+func doRewrite(rm rewriteMap, orig string) *rewriteResult {
+	for re, fn := range rm {
+		if ms := re.FindStringSubmatch(orig); ms != nil {
+			if res := fn(ms); res.updated == orig {
+				return nil // unchanged
+			} else {
+				return res
+			}
+		}
+	}
+	return nil
+}
+
 // rewriteFunc accepts the match groups returned by FindStringSubmatch and returns a non-nil result.
 type rewriteFunc func(ms []string) *rewriteResult
 
@@ -158,16 +167,25 @@ type rewriteResult struct {
 	editNote string // https://musicbrainz.org/doc/Edit_Note
 }
 
+type rewriteMap map[*regexp.Regexp]rewriteFunc
+
 const tidalURLEditNote = "normalize Tidal streaming URLs: https://tickets.metabrainz.org/browse/MBBE-71"
 
-var urlRewrites = map[*regexp.Regexp]rewriteFunc{
+var urlRewrites = rewriteMap{
 	// Normalize Tidal streaming URLs:
 	//  https://listen.tidal.com/album/114997210 -> https://tidal.com/album/114997210
 	//  https://listen.tidal.com/artist/11069    -> https://tidal.com/artist/11069
 	//  https://tidal.com/browse/album/11103031  -> https://tidal.com/album/11103031
 	//  https://tidal.com/browse/artist/5015356  -> https://tidal.com/artist/5015356
 	//  https://tidal.com/browse/track/120087531 -> https://tidal.com/track/120087531
-	regexp.MustCompile(`^https?://(?:listen\.tidal\.com|tidal\.com/browse)(/(?:album|artist|track)/\d+)$`): func(ms []string) *rewriteResult {
+	//  (and many other forms; see TestDoRewrite_URL)
+	regexp.MustCompile(`^https?://` + // both http:// and https://
+		`(?:(?:desktop\.|desktop\.stage\.|listen\.|www\.)?tidal\.com)` + // hostname
+		`(?:/browse)?` + // optional /browse component
+		`(?:/album/\d+)?` + // /album/123 (iff followed by e.g. /track/456 later)
+		`(/(?:album|artist|track|video)/\d+)` + // match significant components, e.g. /album/123
+		`(?:/|\?.*)?` + // trailing slash or query
+		`$`): func(ms []string) *rewriteResult {
 		return &rewriteResult{"https://tidal.com" + ms[1], tidalURLEditNote}
 	},
 }

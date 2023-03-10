@@ -254,3 +254,33 @@ func TestRewriteURL(t *testing.T) {
 		t.Error("Bad requests:\n" + diff)
 	}
 }
+
+func TestDoRewrite_URL(t *testing.T) {
+	for _, tc := range []struct{ orig, want string }{
+		{"https://www.example.org/", ""},
+		{"https://www.example.org/artist/123", ""},
+		{"https://tidal.com/album/11069", ""},      // already canonicalized
+		{"https://test.tidal.com/album/11069", ""}, // unknown hostname
+		{"http://www.tidal.com/test/11069", ""},    // unknown path component
+		{"http://tidal.com/album/11069", "https://tidal.com/album/11069"},
+		{"https://listen.tidal.com/artist/11069", "https://tidal.com/artist/11069"},
+		{"https://tidal.com/browse/track/11069", "https://tidal.com/track/11069"},
+		{"https://www.tidal.com/album/11069", "https://tidal.com/album/11069"},
+		{"https://listen.tidal.com/album/143547274/track/143547275", "https://tidal.com/track/143547275"},
+		{"https://desktop.tidal.com/album/163812859", "https://tidal.com/album/163812859"},
+		{"http://tidal.com/browse/album/119425271?play=true", "https://tidal.com/album/119425271"},
+		{"https://tidal.com/browse/album/126495793/", "https://tidal.com/album/126495793"},
+		{"https://listen.tidal.com/video/78581329", "https://tidal.com/video/78581329"},
+		{"https://www.tidal.com/browse/track/155221653", "https://tidal.com/track/155221653"},
+	} {
+		if res := doRewrite(urlRewrites, tc.orig); res == nil {
+			if tc.want != "" {
+				t.Errorf("doRewrite(urlRewrites, %q) didn't rewrite; want %q", tc.orig, tc.want)
+			}
+		} else if res.updated == "" {
+			t.Errorf("doRewrite(urlRewrites, %q) rewrote to empty string", tc.orig)
+		} else if res.updated != tc.want {
+			t.Errorf("doRewrite(urlRewrites, %q) = %q; want %q", tc.orig, res.updated, tc.want)
+		}
+	}
+}
