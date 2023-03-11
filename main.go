@@ -113,12 +113,12 @@ func cancelEdit(ctx context.Context, ed *editor, id int, editNote string) error 
 // If editNote is non-empty, it will be attached to the edit.
 // If no rewrite is performed, a nil error is returned.
 func rewriteURL(ctx context.Context, api *api, ed *editor, mbid, editNote string) error {
-	orig, err := api.getURL(ctx, mbid)
+	orig, rels, err := api.getURL(ctx, mbid)
 	if err != nil {
 		return fmt.Errorf("failed getting URL: %v", err)
 	}
 
-	res := doRewrite(urlRewrites, orig)
+	res := doRewrite(urlRewrites, orig, rels)
 	if res == nil {
 		log.Printf("%v: no rewrites found for %v", mbid, orig)
 		return nil
@@ -146,10 +146,10 @@ func rewriteURL(ctx context.Context, api *api, ed *editor, mbid, editNote string
 
 // doRewrite looks for an appropriate rewrite for orig.
 // If orig isn't matched by a rewrite or is unchanged after rewriting, nil is returned.
-func doRewrite(rm rewriteMap, orig string) *rewriteResult {
+func doRewrite(rm rewriteMap, orig string, rels *relationships) *rewriteResult {
 	for re, fn := range rm {
 		if ms := re.FindStringSubmatch(orig); ms != nil {
-			if res := fn(ms); res.updated == orig {
+			if res := fn(ms, rels); res == nil || res.updated == orig {
 				return nil // unchanged
 			} else {
 				return res
@@ -159,8 +159,9 @@ func doRewrite(rm rewriteMap, orig string) *rewriteResult {
 	return nil
 }
 
-// rewriteFunc accepts the match groups returned by FindStringSubmatch and returns a non-nil result.
-type rewriteFunc func(ms []string) *rewriteResult
+// rewriteFunc accepts the match groups returned by FindStringSubmatch and returns
+// a rewritten string. nil may be returned to abort the rewrite.
+type rewriteFunc func(ms []string, rels *relationships) *rewriteResult
 
 type rewriteResult struct {
 	updated  string // rewritten string
@@ -182,10 +183,27 @@ var urlRewrites = rewriteMap{
 	regexp.MustCompile(`^https?://` + // both http:// and https://
 		`(?:(?:desktop\.|desktop\.stage\.|listen\.|www\.)?tidal\.com)` + // hostname
 		`(?:/browse)?` + // optional /browse component
-		`(?:/album/\d+)?` + // /album/123 (iff followed by e.g. /track/456 later)
-		`(/(?:album|artist|track|video)/\d+)` + // match significant components, e.g. /album/123
+		`(/(?:album|artist|track|video|album/\d+/track)/\d+)` + // match significant components, e.g. /album/123
 		`(?:/|\?.*)?` + // trailing slash or query
-		`$`): func(ms []string) *rewriteResult {
-		return &rewriteResult{"https://tidal.com" + ms[1], tidalURLEditNote}
+		`$`): func(ms []string, rels *relationships) *rewriteResult {
+		p := ms[1]
+		res := rewriteResult{"https://tidal.com" + p, tidalURLEditNote}
+
+		// If the URL contains both an album and a track, use its relationships to
+		// figure out what it should actually be.
+		if ms := tidalAlbumTrackRegexp.FindStringSubmatch(p); ms != nil {
+			album, track := ms[1], ms[2]
+			if rels.recording > 0 {
+				res.updated = "https://tidal.com/track/" + track
+			} else if rels.release > 0 {
+				res.updated = "https://tidal.com/album/" + album
+			} else {
+				return nil // give up if it's related to neither
+			}
+		}
+
+		return &res
 	},
 }
+
+var tidalAlbumTrackRegexp = regexp.MustCompile(`^/album/(\d+)/track/(\d+)$`)

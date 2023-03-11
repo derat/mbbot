@@ -33,10 +33,13 @@ func newAPI(serverURL string) *api {
 	}
 }
 
-func (a *api) getURL(ctx context.Context, mbid string) (string, error) {
-	r, err := a.send(ctx, "/ws/2/url/"+mbid)
+// relationships contains relationship counts of different types.
+type relationships struct{ artist, release, recording int }
+
+func (a *api) getURL(ctx context.Context, mbid string) (string, *relationships, error) {
+	r, err := a.send(ctx, "/ws/2/url/"+mbid+"?inc=artist-rels+release-rels+recording-rels")
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	defer r.Close()
 
@@ -48,13 +51,31 @@ func (a *api) getURL(ctx context.Context, mbid string) (string, error) {
 	//    </url>
 	//  </metadata>
 	var res struct {
-		XMLName  xml.Name `xml:"metadata"`
-		Resource string   `xml:"url>resource"`
+		XMLName       xml.Name `xml:"metadata"`
+		Resource      string   `xml:"url>resource"`
+		RelationLists []struct {
+			TargetType string     `xml:"target-type,attr"`
+			Relations  []struct{} `xml:"relation"`
+		} `xml:"url>relation-list"`
 	}
 	if err := xml.NewDecoder(r).Decode(&res); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return res.Resource, nil
+
+	// Count relationships of different types.
+	var rels relationships
+	for _, rl := range res.RelationLists {
+		switch rl.TargetType {
+		case "artist":
+			rels.artist = len(rl.Relations)
+		case "release":
+			rels.release = len(rl.Relations)
+		case "recording":
+			rels.recording = len(rl.Relations)
+		}
+	}
+
+	return res.Resource, &rels, nil
 }
 
 // notFoundErr is returned by send if a 404 error was received.

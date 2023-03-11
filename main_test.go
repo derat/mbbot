@@ -166,7 +166,8 @@ func (env *testEnv) handleDefault(w http.ResponseWriter, req *http.Request) {
 }
 
 func (env *testEnv) handleAPIURL(w http.ResponseWriter, req *http.Request) {
-	mbid := strings.TrimPrefix(req.URL.Path, "/ws/2/url/")
+	mbid := strings.TrimSuffix(strings.TrimPrefix(req.URL.Path, "/ws/2/url/"),
+		"?inc=artist-rels+release-rels+recording-rels")
 	url, ok := env.mbidURLs[mbid]
 	if !ok {
 		http.NotFound(w, req)
@@ -256,31 +257,42 @@ func TestRewriteURL(t *testing.T) {
 }
 
 func TestDoRewrite_URL(t *testing.T) {
-	for _, tc := range []struct{ orig, want string }{
-		{"https://www.example.org/", ""},
-		{"https://www.example.org/artist/123", ""},
-		{"https://tidal.com/album/11069", ""},      // already canonicalized
-		{"https://test.tidal.com/album/11069", ""}, // unknown hostname
-		{"http://www.tidal.com/test/11069", ""},    // unknown path component
-		{"http://tidal.com/album/11069", "https://tidal.com/album/11069"},
-		{"https://listen.tidal.com/artist/11069", "https://tidal.com/artist/11069"},
-		{"https://tidal.com/browse/track/11069", "https://tidal.com/track/11069"},
-		{"https://www.tidal.com/album/11069", "https://tidal.com/album/11069"},
-		{"https://listen.tidal.com/album/143547274/track/143547275", "https://tidal.com/track/143547275"},
-		{"https://desktop.tidal.com/album/163812859", "https://tidal.com/album/163812859"},
-		{"http://tidal.com/browse/album/119425271?play=true", "https://tidal.com/album/119425271"},
-		{"https://tidal.com/browse/album/126495793/", "https://tidal.com/album/126495793"},
-		{"https://listen.tidal.com/video/78581329", "https://tidal.com/video/78581329"},
-		{"https://www.tidal.com/browse/track/155221653", "https://tidal.com/track/155221653"},
+	for _, tc := range []struct {
+		orig, want string
+		rels       *relationships
+	}{
+		{"https://www.example.org/", "", nil},
+		{"https://www.example.org/artist/123", "", nil},
+		{"https://tidal.com/album/11069", "", nil},      // already canonicalized
+		{"https://test.tidal.com/album/11069", "", nil}, // unknown hostname
+		{"http://www.tidal.com/test/11069", "", nil},    // unknown path component
+		{"http://tidal.com/album/11069", "https://tidal.com/album/11069", nil},
+		{"https://listen.tidal.com/artist/11069", "https://tidal.com/artist/11069", nil},
+		{"https://tidal.com/browse/track/11069", "https://tidal.com/track/11069", nil},
+		{"https://www.tidal.com/album/11069", "https://tidal.com/album/11069", nil},
+		{"https://listen.tidal.com/album/123/track/456", "https://tidal.com/album/123", &relationships{release: 1}},
+		{"https://listen.tidal.com/album/123/track/456", "https://tidal.com/track/456", &relationships{recording: 1}},
+		{"https://listen.tidal.com/album/123/track/456", "https://tidal.com/track/456",
+			&relationships{release: 1, recording: 1}},
+		{"https://listen.tidal.com/album/123/track/456", "", &relationships{artist: 1}},
+		{"https://desktop.tidal.com/album/163812859", "https://tidal.com/album/163812859", nil},
+		{"http://tidal.com/browse/album/119425271?play=true", "https://tidal.com/album/119425271", nil},
+		{"https://tidal.com/browse/album/126495793/", "https://tidal.com/album/126495793", nil},
+		{"https://listen.tidal.com/video/78581329", "https://tidal.com/video/78581329", nil},
+		{"https://www.tidal.com/browse/track/155221653", "https://tidal.com/track/155221653", nil},
 	} {
-		if res := doRewrite(urlRewrites, tc.orig); res == nil {
+		rels := tc.rels
+		if rels == nil {
+			rels = &relationships{}
+		}
+		if res := doRewrite(urlRewrites, tc.orig, rels); res == nil {
 			if tc.want != "" {
-				t.Errorf("doRewrite(urlRewrites, %q) didn't rewrite; want %q", tc.orig, tc.want)
+				t.Errorf("doRewrite(urlRewrites, %q, %v) didn't rewrite; want %q", tc.orig, rels, tc.want)
 			}
 		} else if res.updated == "" {
-			t.Errorf("doRewrite(urlRewrites, %q) rewrote to empty string", tc.orig)
+			t.Errorf("doRewrite(urlRewrites, %q, %v) rewrote to empty string", tc.orig, rels)
 		} else if res.updated != tc.want {
-			t.Errorf("doRewrite(urlRewrites, %q) = %q; want %q", tc.orig, res.updated, tc.want)
+			t.Errorf("doRewrite(urlRewrites, %q, %v) = %q; want %q", tc.orig, rels, res.updated, tc.want)
 		}
 	}
 }
