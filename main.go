@@ -20,7 +20,7 @@ import (
 
 const (
 	actionCancel = "cancel" // cancel edits with IDs read from stdin
-	actionURLs   = "urls"   // rewrite URLs corresponding to MBIDs read from stdin
+	actionURLs   = "urls"   // update URLs corresponding to MBIDs read from stdin
 )
 
 var allActions = []string{
@@ -80,7 +80,7 @@ func main() {
 				break
 			} else if err != nil {
 				log.Fatal("Failed reading MBID: ", err)
-			} else if err := rewriteURL(ctx, api, ed, mbid, *editNote); err != nil {
+			} else if err := updateURL(ctx, api, ed, mbid, *editNote); err != nil {
 				log.Printf("Failed rewriting %q: %v", mbid, err)
 			}
 		}
@@ -109,44 +109,44 @@ func cancelEdit(ctx context.Context, ed *editor, id int, editNote string) error 
 	return err
 }
 
-// rewriteURL attempts to rewrite the URL with the specified MBID.
+// updateURL attempts to update the URL with the specified MBID.
 // If editNote is non-empty, it will be attached to the edit.
-// If no rewrite is performed, a nil error is returned.
-func rewriteURL(ctx context.Context, api *api, ed *editor, mbid, editNote string) error {
-	orig, rels, err := api.getURL(ctx, mbid)
+// If no updates are performed, a nil error is returned.
+func updateURL(ctx context.Context, api *api, ed *editor, mbid, editNote string) error {
+	info, err := api.getURL(ctx, mbid)
 	if err != nil {
 		return fmt.Errorf("failed getting URL: %v", err)
 	}
 
-	res := doRewrite(urlRewrites, orig, rels)
-	if res == nil {
-		log.Printf("%v: no rewrites found for %v", mbid, orig)
-		return nil
-	}
-
-	if editNote != "" {
-		res.editNote = editNote
-	}
-
-	log.Printf("%v: rewriting %v to %v", mbid, orig, res.updated)
-	b, err := ed.post(ctx, "/url/"+mbid+"/edit", map[string]string{
-		"edit-url.url":       res.updated,
-		"edit-url.edit_note": res.editNote,
-	})
-	if err != nil {
-		return err
-	}
-	if ms := ed.editIDRegexp.FindStringSubmatch(string(b)); ms == nil {
-		return errors.New("didn't find edit ID")
+	if res := doRewrite(urlRewrites, info.url, &info.rels); res == nil {
+		log.Printf("%v: no rewrites found for %v", mbid, info.url)
 	} else {
-		log.Printf("%v: created edit #%s", mbid, ms[1])
+		if editNote != "" {
+			res.editNote = editNote
+		}
+		log.Printf("%v: rewriting %v to %v", mbid, info.url, res.updated)
+		b, err := ed.post(ctx, "/url/"+mbid+"/edit", map[string]string{
+			"edit-url.url":       res.updated,
+			"edit-url.edit_note": res.editNote,
+		})
+		if err != nil {
+			return err
+		}
+		if ms := ed.editIDRegexp.FindStringSubmatch(string(b)); ms == nil {
+			return errors.New("didn't find edit ID")
+		} else {
+			log.Printf("%v: created edit #%s", mbid, ms[1])
+		}
 	}
+
+	// TODO: Do additional edits, e.g. updating relationships.
+
 	return nil
 }
 
 // doRewrite looks for an appropriate rewrite for orig.
 // If orig isn't matched by a rewrite or is unchanged after rewriting, nil is returned.
-func doRewrite(rm rewriteMap, orig string, rels *relationships) *rewriteResult {
+func doRewrite(rm rewriteMap, orig string, rels *relInfos) *rewriteResult {
 	for re, fn := range rm {
 		if ms := re.FindStringSubmatch(orig); ms != nil {
 			if res := fn(ms, rels); res == nil || res.updated == orig {
@@ -161,7 +161,7 @@ func doRewrite(rm rewriteMap, orig string, rels *relationships) *rewriteResult {
 
 // rewriteFunc accepts the match groups returned by FindStringSubmatch and returns
 // a rewritten string. nil may be returned to abort the rewrite.
-type rewriteFunc func(ms []string, rels *relationships) *rewriteResult
+type rewriteFunc func(ms []string, rels *relInfos) *rewriteResult
 
 type rewriteResult struct {
 	updated  string // rewritten string
@@ -185,7 +185,7 @@ var urlRewrites = rewriteMap{
 		`(?:/browse)?` + // optional /browse component
 		`(/(?:album|artist|track|video|album/\d+/track)/\d+)` + // match significant components, e.g. /album/123
 		`(?:/|\?.*)?` + // trailing slash or query
-		`$`): func(ms []string, rels *relationships) *rewriteResult {
+		`$`): func(ms []string, rels *relInfos) *rewriteResult {
 		p := ms[1]
 		res := rewriteResult{"https://tidal.com" + p, tidalURLEditNote}
 
@@ -193,9 +193,9 @@ var urlRewrites = rewriteMap{
 		// figure out what it should actually be.
 		if ms := tidalAlbumTrackRegexp.FindStringSubmatch(p); ms != nil {
 			album, track := ms[1], ms[2]
-			if rels.recording > 0 {
+			if len(rels.recordingRels) > 0 {
 				res.updated = "https://tidal.com/track/" + track
-			} else if rels.release > 0 {
+			} else if len(rels.releaseRels) > 0 {
 				res.updated = "https://tidal.com/album/" + album
 			} else {
 				return nil // give up if it's related to neither

@@ -33,13 +33,29 @@ func newAPI(serverURL string) *api {
 	}
 }
 
-// relationships contains relationship counts of different types.
-type relationships struct{ artist, release, recording int }
+// urlInfo describes a URL in the database.
+type urlInfo struct {
+	url  string
+	rels relInfos
+}
 
-func (a *api) getURL(ctx context.Context, mbid string) (string, *relationships, error) {
+// relInfo describes a relationship between one entity and another.
+type relInfo struct {
+	typeDesc   string
+	typeMBID   string
+	targetMBID string
+	backward   bool
+	endDate    string
+	ended      bool
+}
+
+// relInfos holds information about relationships of different types.
+type relInfos struct{ artistRels, releaseRels, recordingRels []relInfo }
+
+func (a *api) getURL(ctx context.Context, mbid string) (*urlInfo, error) {
 	r, err := a.send(ctx, "/ws/2/url/"+mbid+"?inc=artist-rels+release-rels+recording-rels")
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 	defer r.Close()
 
@@ -52,30 +68,51 @@ func (a *api) getURL(ctx context.Context, mbid string) (string, *relationships, 
 	//  </metadata>
 	var res struct {
 		XMLName       xml.Name `xml:"metadata"`
-		Resource      string   `xml:"url>resource"`
+		Resource      string   `xml:"url>resource"` // e.g. "http://www.geocities.jp/orgel0104/"
 		RelationLists []struct {
-			TargetType string     `xml:"target-type,attr"`
-			Relations  []struct{} `xml:"relation"`
+			TargetType string `xml:"target-type,attr"` // e.g. "artist"
+			Relations  []struct {
+				Type      string `xml:"type,attr"`    // e.g. "official homepage"
+				TypeID    string `xml:"type-id,attr"` // e.g. "fe33d22f-c3b0-4d68-bd53-a856badf2b15"
+				Target    string `xml:"target"`       // e.g. "ef673d88-4c3c-4c90-a46d-2ee30946b6f0"
+				Direction string `xml:"direction"`    // e.g. "backward"
+				End       string `xml:"end"`          // e.g. "2019-03-31"
+				Ended     bool   `xml:"ended"`
+			} `xml:"relation"`
 		} `xml:"url>relation-list"`
 	}
 	if err := xml.NewDecoder(r).Decode(&res); err != nil {
-		return "", nil, err
+		return nil, err
 	}
 
-	// Count relationships of different types.
-	var rels relationships
+	info := urlInfo{url: res.Resource}
+
 	for _, rl := range res.RelationLists {
+		var dst *[]relInfo
 		switch rl.TargetType {
 		case "artist":
-			rels.artist = len(rl.Relations)
+			dst = &info.rels.artistRels
 		case "release":
-			rels.release = len(rl.Relations)
+			dst = &info.rels.releaseRels
 		case "recording":
-			rels.recording = len(rl.Relations)
+			dst = &info.rels.recordingRels
+		}
+		if dst == nil {
+			continue
+		}
+		for _, rel := range rl.Relations {
+			*dst = append(*dst, relInfo{
+				typeDesc:   rel.Type,
+				typeMBID:   rel.TypeID,
+				targetMBID: rel.Target,
+				backward:   rel.Direction == "backward",
+				endDate:    rel.End,
+				ended:      rel.Ended,
+			})
 		}
 	}
 
-	return res.Resource, &rels, nil
+	return &info, nil
 }
 
 // notFoundErr is returned by send if a 404 error was received.

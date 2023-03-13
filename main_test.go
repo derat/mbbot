@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"text/template"
 
 	"github.com/google/go-cmp/cmp"
 	"golang.org/x/time/rate"
@@ -34,7 +35,8 @@ type testEnv struct {
 	ed  *editor
 
 	mbidURLs map[string]string // MBID-to-URL mappings for API
-	requests []request         // POST requests sent to server
+	mbidRels map[string]relInfos
+	requests []request // POST requests sent to server
 
 	origLogDest io.Writer
 }
@@ -173,14 +175,48 @@ func (env *testEnv) handleAPIURL(w http.ResponseWriter, req *http.Request) {
 		http.NotFound(w, req)
 		return
 	}
+	rels := env.mbidRels[mbid]
+
+	tmpl, err := template.New("").Parse(urlTmpl)
+	if err != nil {
+		env.t.Fatal("Failed parsing template:", err)
+	}
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
-<metadata xmlns="http://musicbrainz.org/ns/mmd-2.0#">
-  <url id="%s">
-    <resource>%s</resource>
-  </url>
-</metadata>`, mbid, url)
+	if err := tmpl.Execute(w, struct {
+		MBID string
+		URL  string
+		Rels map[string][]relInfo
+	}{
+		MBID: mbid,
+		URL:  url,
+		Rels: map[string][]relInfo{
+			"artist":    rels.artistRels,
+			"release":   rels.releaseRels,
+			"recording": rels.recordingRels,
+		},
+	}); err != nil {
+		env.t.Fatal("Failed exxecuting template:", err)
+	}
 }
+
+const urlTmpl = `<?xml version="1.0" encoding="UTF-8"?>
+<metadata xmlns="http://musicbrainz.org/ns/mmd-2.0#">
+  <url id="{{.MBID}}">
+    <resource>{{.URL}}</resource>
+	{{- range $type, $rels := .Rels}}
+    <relation-list target-type="{{$type}}">
+	  {{- range $rels}}
+      <relation type="{{.typeDesc}}" type-id="{{.typeMBID}}">
+        <target>{{.targetMBID}}</target>
+        <direction>{{if .backward}}backward{{end}}</direction>
+        <end>{{.endDate}}</end>
+        <ended>{{.ended}}</ended>
+      </relation>
+	  {{- end}}
+    </relation-list>
+    {{- end}}
+  </url>
+</metadata>`
 
 // request describes a request that was posted to the server.
 type request struct {
@@ -227,7 +263,7 @@ func TestCancelEdit(t *testing.T) {
 	}
 }
 
-func TestRewriteURL(t *testing.T) {
+func TestUpdateURL(t *testing.T) {
 	ctx := context.Background()
 	env := newTestEnv(ctx, t)
 	defer env.close()
@@ -243,8 +279,8 @@ func TestRewriteURL(t *testing.T) {
 	env.mbidURLs[mbid3] = "https://tidal.com/album/1234" // already normalized
 
 	for _, mbid := range []string{mbid1, mbid2, mbid3} {
-		if err := rewriteURL(ctx, env.api, env.ed, mbid, ""); err != nil {
-			t.Errorf("rewriteURL(ctx, api, ed, %q, %q) failed: %v", mbid, "", err)
+		if err := updateURL(ctx, env.api, env.ed, mbid, ""); err != nil {
+			t.Errorf("updateURL(ctx, api, ed, %q, %q) failed: %v", mbid, "", err)
 		}
 	}
 	want := []request{
@@ -259,7 +295,7 @@ func TestRewriteURL(t *testing.T) {
 func TestDoRewrite_URL(t *testing.T) {
 	for _, tc := range []struct {
 		orig, want string
-		rels       *relationships
+		rels       *relInfos
 	}{
 		{"https://www.example.org/", "", nil},
 		{"https://www.example.org/artist/123", "", nil},
@@ -270,11 +306,13 @@ func TestDoRewrite_URL(t *testing.T) {
 		{"https://listen.tidal.com/artist/11069", "https://tidal.com/artist/11069", nil},
 		{"https://tidal.com/browse/track/11069", "https://tidal.com/track/11069", nil},
 		{"https://www.tidal.com/album/11069", "https://tidal.com/album/11069", nil},
-		{"https://listen.tidal.com/album/123/track/456", "https://tidal.com/album/123", &relationships{release: 1}},
-		{"https://listen.tidal.com/album/123/track/456", "https://tidal.com/track/456", &relationships{recording: 1}},
+		{"https://listen.tidal.com/album/123/track/456", "https://tidal.com/album/123",
+			&relInfos{releaseRels: []relInfo{{}}}},
 		{"https://listen.tidal.com/album/123/track/456", "https://tidal.com/track/456",
-			&relationships{release: 1, recording: 1}},
-		{"https://listen.tidal.com/album/123/track/456", "", &relationships{artist: 1}},
+			&relInfos{recordingRels: []relInfo{{}}}},
+		{"https://listen.tidal.com/album/123/track/456", "https://tidal.com/track/456",
+			&relInfos{releaseRels: []relInfo{{}}, recordingRels: []relInfo{{}}}},
+		{"https://listen.tidal.com/album/123/track/456", "", &relInfos{artistRels: []relInfo{{}}}},
 		{"https://desktop.tidal.com/album/163812859", "https://tidal.com/album/163812859", nil},
 		{"http://tidal.com/browse/album/119425271?play=true", "https://tidal.com/album/119425271", nil},
 		{"https://tidal.com/browse/album/126495793/", "https://tidal.com/album/126495793", nil},
@@ -283,7 +321,7 @@ func TestDoRewrite_URL(t *testing.T) {
 	} {
 		rels := tc.rels
 		if rels == nil {
-			rels = &relationships{}
+			rels = &relInfos{}
 		}
 		if res := doRewrite(urlRewrites, tc.orig, rels); res == nil {
 			if tc.want != "" {
