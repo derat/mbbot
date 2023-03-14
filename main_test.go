@@ -5,15 +5,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
+	"regexp"
 	"testing"
-	"text/template"
 
 	"github.com/google/go-cmp/cmp"
 	"golang.org/x/time/rate"
@@ -31,11 +31,10 @@ type testEnv struct {
 	t   *testing.T
 	srv *httptest.Server
 	mux *http.ServeMux
-	api *api
 	ed  *editor
 
-	mbidURLs map[string]string // MBID-to-URL mappings for API
-	mbidRels map[string]relInfos
+	mbidURLs map[string]string // MBID-to-URL mappings to return
+	mbidRels map[string][]jsonRelationship
 	requests []request // POST requests sent to server
 
 	origLogDest io.Writer
@@ -53,7 +52,6 @@ func newTestEnv(ctx context.Context, t *testing.T) *testEnv {
 	log.SetOutput(io.Discard)
 
 	env.mux.HandleFunc("/login", env.handleLogin)
-	env.mux.HandleFunc("/ws/2/url/", env.handleAPIURL)
 	env.mux.HandleFunc("/", env.handleDefault)
 
 	env.srv = httptest.NewServer(env.mux)
@@ -64,11 +62,9 @@ func newTestEnv(ctx context.Context, t *testing.T) *testEnv {
 		}
 	}()
 
-	env.api = newAPI(env.srv.URL)
-	env.api.limiter.SetLimit(rate.Inf)
-
 	var err error
-	if env.ed, err = newEditor(ctx, env.srv.URL, testUser, testPass); err != nil {
+	env.ed, err = newEditor(ctx, env.srv.URL, testUser, testPass, editorRateLimit(rate.Inf))
+	if err != nil {
 		t.Fatal("Failed logging in:", err)
 	}
 
@@ -139,11 +135,43 @@ func (env *testEnv) handleLogin(w http.ResponseWriter, req *http.Request) {
 }
 
 func (env *testEnv) handleDefault(w http.ResponseWriter, req *http.Request) {
-	if req.Method != http.MethodPost {
+	switch req.Method {
+	case http.MethodGet:
+		env.handleGet(w, req)
+	case http.MethodPost:
+		env.handlePost(w, req)
+	default:
 		env.t.Errorf("Unexpected %v request for %v", req.Method, req.URL.Path)
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
-		return
 	}
+}
+
+func (env *testEnv) handleGet(w http.ResponseWriter, req *http.Request) {
+	if ms := editURLPathRegexp.FindStringSubmatch(req.URL.Path); ms != nil {
+		mbid := ms[1]
+		url, ok := env.mbidURLs[mbid]
+		if !ok {
+			http.NotFound(w, req)
+			return
+		}
+
+		var data jsonData
+		data.Stash.SourceEntity.Name = url
+		data.Stash.SourceEntity.Decoded = url
+		data.Stash.SourceEntity.Relationships = env.mbidRels[mbid]
+
+		io.WriteString(w, `<!DOCTYPE html><html><head>`)
+		io.WriteString(w, `<script>Object.defineProperty(window,"__MB__",{value:Object.freeze({"DBDefs":Object.freeze({}),"$c":Object.freeze(`)
+		json.NewEncoder(w).Encode(data)
+		io.WriteString(w, `)})})</script></head></html>`)
+	} else {
+		http.NotFound(w, req)
+	}
+}
+
+var editURLPathRegexp = regexp.MustCompile(`^/url/([^/]+)/edit$`)
+
+func (env *testEnv) handlePost(w http.ResponseWriter, req *http.Request) {
 	if err := req.ParseForm(); err != nil {
 		env.t.Errorf("Failed parsing request for %v: %v", req.URL.Path, err)
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
@@ -166,57 +194,6 @@ func (env *testEnv) handleDefault(w http.ResponseWriter, req *http.Request) {
   </body>
 </html>`, env.srv.URL)
 }
-
-func (env *testEnv) handleAPIURL(w http.ResponseWriter, req *http.Request) {
-	mbid := strings.TrimSuffix(strings.TrimPrefix(req.URL.Path, "/ws/2/url/"),
-		"?inc=artist-rels+release-rels+recording-rels")
-	url, ok := env.mbidURLs[mbid]
-	if !ok {
-		http.NotFound(w, req)
-		return
-	}
-	rels := env.mbidRels[mbid]
-
-	tmpl, err := template.New("").Parse(urlTmpl)
-	if err != nil {
-		env.t.Fatal("Failed parsing template:", err)
-	}
-	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-	if err := tmpl.Execute(w, struct {
-		MBID string
-		URL  string
-		Rels map[string][]relInfo
-	}{
-		MBID: mbid,
-		URL:  url,
-		Rels: map[string][]relInfo{
-			"artist":    rels.artistRels,
-			"release":   rels.releaseRels,
-			"recording": rels.recordingRels,
-		},
-	}); err != nil {
-		env.t.Fatal("Failed exxecuting template:", err)
-	}
-}
-
-const urlTmpl = `<?xml version="1.0" encoding="UTF-8"?>
-<metadata xmlns="http://musicbrainz.org/ns/mmd-2.0#">
-  <url id="{{.MBID}}">
-    <resource>{{.URL}}</resource>
-	{{- range $type, $rels := .Rels}}
-    <relation-list target-type="{{$type}}">
-	  {{- range $rels}}
-      <relation type="{{.typeDesc}}" type-id="{{.typeMBID}}">
-        <target>{{.targetMBID}}</target>
-        <direction>{{if .backward}}backward{{end}}</direction>
-        <end>{{.endDate}}</end>
-        <ended>{{.ended}}</ended>
-      </relation>
-	  {{- end}}
-    </relation-list>
-    {{- end}}
-  </url>
-</metadata>`
 
 // request describes a request that was posted to the server.
 type request struct {
@@ -279,8 +256,8 @@ func TestUpdateURL(t *testing.T) {
 	env.mbidURLs[mbid3] = "https://tidal.com/album/1234" // already normalized
 
 	for _, mbid := range []string{mbid1, mbid2, mbid3} {
-		if err := updateURL(ctx, env.api, env.ed, mbid, ""); err != nil {
-			t.Errorf("updateURL(ctx, api, ed, %q, %q) failed: %v", mbid, "", err)
+		if err := updateURL(ctx, env.ed, mbid, ""); err != nil {
+			t.Errorf("updateURL(ctx, ed, %q, %q) failed: %v", mbid, "", err)
 		}
 	}
 	want := []request{
@@ -295,7 +272,7 @@ func TestUpdateURL(t *testing.T) {
 func TestDoRewrite_URL(t *testing.T) {
 	for _, tc := range []struct {
 		orig, want string
-		rels       *relInfos
+		rels       []relInfo
 	}{
 		{"https://www.example.org/", "", nil},
 		{"https://www.example.org/artist/123", "", nil},
@@ -306,31 +283,25 @@ func TestDoRewrite_URL(t *testing.T) {
 		{"https://listen.tidal.com/artist/11069", "https://tidal.com/artist/11069", nil},
 		{"https://tidal.com/browse/track/11069", "https://tidal.com/track/11069", nil},
 		{"https://www.tidal.com/album/11069", "https://tidal.com/album/11069", nil},
-		{"https://listen.tidal.com/album/123/track/456", "https://tidal.com/album/123",
-			&relInfos{releaseRels: []relInfo{{}}}},
+		{"https://listen.tidal.com/album/123/track/456", "https://tidal.com/album/123", []relInfo{{targetType: "release"}}},
+		{"https://listen.tidal.com/album/123/track/456", "https://tidal.com/track/456", []relInfo{{targetType: "recording"}}},
 		{"https://listen.tidal.com/album/123/track/456", "https://tidal.com/track/456",
-			&relInfos{recordingRels: []relInfo{{}}}},
-		{"https://listen.tidal.com/album/123/track/456", "https://tidal.com/track/456",
-			&relInfos{releaseRels: []relInfo{{}}, recordingRels: []relInfo{{}}}},
-		{"https://listen.tidal.com/album/123/track/456", "", &relInfos{artistRels: []relInfo{{}}}},
+			[]relInfo{{targetType: "release"}, {targetType: "recording"}}},
+		{"https://listen.tidal.com/album/123/track/456", "", []relInfo{{targetType: "artist"}}},
 		{"https://desktop.tidal.com/album/163812859", "https://tidal.com/album/163812859", nil},
 		{"http://tidal.com/browse/album/119425271?play=true", "https://tidal.com/album/119425271", nil},
 		{"https://tidal.com/browse/album/126495793/", "https://tidal.com/album/126495793", nil},
 		{"https://listen.tidal.com/video/78581329", "https://tidal.com/video/78581329", nil},
 		{"https://www.tidal.com/browse/track/155221653", "https://tidal.com/track/155221653", nil},
 	} {
-		rels := tc.rels
-		if rels == nil {
-			rels = &relInfos{}
-		}
-		if res := doRewrite(urlRewrites, tc.orig, rels); res == nil {
+		if res := doRewrite(urlRewrites, tc.orig, tc.rels); res == nil {
 			if tc.want != "" {
-				t.Errorf("doRewrite(urlRewrites, %q, %v) didn't rewrite; want %q", tc.orig, rels, tc.want)
+				t.Errorf("doRewrite(urlRewrites, %q, %v) didn't rewrite; want %q", tc.orig, tc.rels, tc.want)
 			}
 		} else if res.updated == "" {
-			t.Errorf("doRewrite(urlRewrites, %q, %v) rewrote to empty string", tc.orig, rels)
+			t.Errorf("doRewrite(urlRewrites, %q, %v) rewrote to empty string", tc.orig, tc.rels)
 		} else if res.updated != tc.want {
-			t.Errorf("doRewrite(urlRewrites, %q, %v) = %q; want %q", tc.orig, rels, res.updated, tc.want)
+			t.Errorf("doRewrite(urlRewrites, %q, %v) = %q; want %q", tc.orig, tc.rels, res.updated, tc.want)
 		}
 	}
 }

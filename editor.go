@@ -4,7 +4,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,14 +17,23 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"golang.org/x/time/rate"
 )
 
-const sessionCookie = "musicbrainz_server_session"
+const (
+	// https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting
+	maxQPS    = 1
+	userAgent = "derat_bot/0 ( https://github.com/derat/mbbot )"
 
-// editor submits edits to the MusicBrainz website.
+	sessionCookie = "musicbrainz_server_session"
+)
+
+// editor communicates with the MusicBrainz website.
 type editor struct {
 	serverURL    string // e.g. "https://musicbrainz.org"
 	client       http.Client
+	limiter      *rate.Limiter
 	jar          *cookiejar.Jar
 	dryRun       bool           // if true, don't perform edits
 	editIDRegexp *regexp.Regexp // matches ID in <server>/edit/<id> URLs
@@ -34,10 +45,20 @@ var (
 	csrfTokenRegexp      = regexp.MustCompile(`<input name="csrf_token"\s+type="hidden"\s+value="([^"]+)"`)
 )
 
-func newEditor(ctx context.Context, serverURL, user, pass string) (*editor, error) {
+type editorOption func(ed *editor)
+
+func editorRateLimit(limit rate.Limit) editorOption {
+	return func(ed *editor) { ed.limiter.SetLimit(limit) }
+}
+
+func newEditor(ctx context.Context, serverURL, user, pass string, opts ...editorOption) (*editor, error) {
 	ed := editor{
 		serverURL:    serverURL,
+		limiter:      rate.NewLimiter(maxQPS, 1),
 		editIDRegexp: regexp.MustCompile(regexp.QuoteMeta(serverURL) + `/edit/(\d+)\b`),
+	}
+	for _, opt := range opts {
+		opt(&ed)
 	}
 
 	var err error
@@ -103,6 +124,10 @@ func (ed *editor) post(ctx context.Context, path string, vals map[string]string)
 // The response body is returned. All non-200 responses (after following redirects)
 // cause an error to be returned.
 func (ed *editor) send(ctx context.Context, method, path string, vals map[string]string) ([]byte, error) {
+	if err := ed.limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
+
 	u := ed.serverURL + path
 
 	var body io.Reader
@@ -143,4 +168,110 @@ func (ed *editor) send(ctx context.Context, method, path string, vals map[string
 		return b, fmt.Errorf("got %v: %v", resp.StatusCode, resp.Status)
 	}
 	return b, err
+}
+
+// urlInfo describes a URL in the database.
+type urlInfo struct {
+	url  string
+	rels []relInfo
+}
+
+// relInfo describes a relationship between one entity and another.
+type relInfo struct {
+	id         int    // database ID of link itself
+	linkTypeID int    // database ID of link type, e.g. 978 for artist streaming page
+	beginDate  string // YYYY-MM-DD
+	endDate    string // YYYY-MM-DD
+	ended      bool
+	backward   bool
+	targetMBID string
+	targetName string
+	targetType string // entity type, e.g. "artist", "release", "recording"
+}
+
+// filterRels returns relationships to targets of the specified type, e.g. "artist".
+func filterRels(rels []relInfo, entityType string) []relInfo {
+	var filtered []relInfo
+	for _, rel := range rels {
+		if rel.targetType == entityType {
+			filtered = append(filtered, rel)
+		}
+	}
+	return filtered
+}
+
+// getURLInfo fetches information about a URL (identified by its MBID).
+// TODO: Consider updating this to get info about arbitrary entity types.
+// Probably the only parts that need to change are the URL path and Decoded field.
+func (ed *editor) getURLInfo(ctx context.Context, mbid string) (*urlInfo, error) {
+	b, err := ed.get(ctx, "/url/"+mbid+"/edit")
+	if err != nil {
+		return nil, err
+	}
+
+	// This is horrible: extract a property definition from the middle of a script tag.
+	seek := func(b []byte, pre string) []byte {
+		idx := bytes.Index(b, []byte(pre))
+		if idx == -1 {
+			return nil
+		}
+		return b[idx+len(pre):]
+	}
+	if b = seek(b, `Object.defineProperty(window,"__MB__",`); b == nil {
+		return nil, errors.New("missing __MB__ property")
+	}
+	if b = seek(b, `,"$c":Object.freeze(`); b == nil {
+		return nil, errors.New("missing $c property")
+	}
+
+	var data jsonData
+	if err := json.NewDecoder(bytes.NewReader(b)).Decode(&data); err != nil {
+		return nil, err
+	}
+	ent := &data.Stash.SourceEntity
+	if ent.Name != ent.Decoded {
+		return nil, fmt.Errorf("URLs don't match (name=%q, decoded=%q)", ent.Name, ent.Decoded)
+	}
+	info := urlInfo{url: ent.Decoded}
+	for _, rel := range ent.Relationships {
+		info.rels = append(info.rels, relInfo{
+			id:         rel.ID,
+			linkTypeID: rel.LinkTypeID,
+			beginDate:  rel.BeginDate,
+			endDate:    rel.EndDate,
+			ended:      rel.Ended,
+			targetMBID: rel.Target.GID,
+			targetName: rel.Target.Name,
+			targetType: rel.Target.EntityType,
+		})
+	}
+	return &info, nil
+}
+
+// jsonData corresponds to the window.__MB__.$c object.
+type jsonData struct {
+	Stash struct {
+		SourceEntity struct {
+			// I have no idea which of this is the canonical URL, so check them both.
+			Name    string `json:"name"`
+			Decoded string `json:"decoded"`
+
+			Relationships []jsonRelationship `json:"relationships"`
+		} `json:"source_entity"`
+	} `json:"stash"`
+}
+
+// jsonRelationship corresponds to a relationship in jsonData.
+type jsonRelationship struct {
+	ID         int    `json:"id"`
+	LinkTypeID int    `json:"linkTypeID"`
+	Backward   bool   `json:"backward"`
+	BeginDate  string `json:"begin_date"`
+	EndDate    string `json:"end_date"`
+	Ended      bool   `json:"ended"`
+	Target     struct {
+		Name       string `json:"name"`
+		EntityType string `json:"entityType"`
+		GID        string `json:"gid"`
+	} `json:"target"`
 }
