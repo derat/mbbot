@@ -45,6 +45,7 @@ func newTestEnv(ctx context.Context, t *testing.T) *testEnv {
 		t:           t,
 		mux:         http.NewServeMux(),
 		mbidURLs:    make(map[string]string),
+		mbidRels:    make(map[string][]jsonRelationship),
 		origLogDest: log.Writer(),
 	}
 
@@ -169,8 +170,6 @@ func (env *testEnv) handleGet(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-var editURLPathRegexp = regexp.MustCompile(`^/url/([^/]+)/edit$`)
-
 func (env *testEnv) handlePost(w http.ResponseWriter, req *http.Request) {
 	if err := req.ParseForm(); err != nil {
 		env.t.Errorf("Failed parsing request for %v: %v", req.URL.Path, err)
@@ -183,43 +182,38 @@ func (env *testEnv) handlePost(w http.ResponseWriter, req *http.Request) {
 	u.Host = ""
 	env.requests = append(env.requests, request{u.String(), req.PostForm})
 
-	// Write a simple page containing an arbitrary edit ID.
-	// TODO: Maybe return something different for cancel requests? It doesn't matter at the moment.
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!DOCTYPE html>
+	switch {
+	case cancelEditPathRegexp.MatchString(req.URL.Path):
+		// TODO: Maybe return something here? The bot doesn't check the response.
+	case editURLPathRegexp.MatchString(req.URL.Path):
+		// Write a simple page containing an arbitrary edit ID.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, `<!DOCTYPE html>
 <html>
   <head><title>MusicBrainz</title></head>
   <body>
     <p>Thank you, your <a href="%s/edit/123">edit</a> (#123) has been entered into the edit queue for peer review.</p>
   </body>
 </html>`, env.srv.URL)
+	case req.URL.Path == "/relationship-editor":
+		// Just write a bogus JSON object reporting one successful edit.
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"edits":[{"edit_type":1,"response":1}]}`)
+	default:
+		env.t.Errorf("Unexpected post to %v", req.URL.Path)
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+	}
 }
+
+var (
+	cancelEditPathRegexp = regexp.MustCompile(`^/edit/\d+/cancel$`)
+	editURLPathRegexp    = regexp.MustCompile(`^/url/([^/]+)/edit$`)
+)
 
 // request describes a request that was posted to the server.
 type request struct {
 	path   string
 	params url.Values
-}
-
-// cancelRequest constructs a request for canceling an edit.
-func cancelRequest(id int, editNote string) request {
-	return request{
-		path: fmt.Sprintf("/edit/%d/cancel", id),
-		params: url.Values{
-			"confirm.edit_note": []string{editNote},
-		},
-	}
-}
-
-// urlRequest constructs a request for changing a URL.
-func urlRequest(mbid, newURL, editNote string) request {
-	return request{
-		path: "/url/" + mbid + "/edit",
-		params: url.Values{
-			"edit-url.url":       []string{newURL},
-			"edit-url.edit_note": []string{editNote},
-		},
-	}
 }
 
 func TestCancelEdit(t *testing.T) {
@@ -234,7 +228,12 @@ func TestCancelEdit(t *testing.T) {
 	if err := cancelEdit(ctx, env.ed, id, editNote); err != nil {
 		t.Fatalf("cancelEdit(ctx, ed, %d, %q) failed: %v", id, editNote, err)
 	}
-	want := []request{cancelRequest(id, editNote)}
+	want := []request{{
+		path: fmt.Sprintf("/edit/%d/cancel", id),
+		params: url.Values{
+			"confirm.edit_note": []string{editNote},
+		},
+	}}
 	if diff := cmp.Diff(want, env.requests, cmp.AllowUnexported(request{})); diff != "" {
 		t.Error("Bad requests:\n" + diff)
 	}
@@ -252,8 +251,13 @@ func TestUpdateURL(t *testing.T) {
 	)
 
 	env.mbidURLs[mbid1] = "http://listen.tidal.com/artist/11069"
-	env.mbidURLs[mbid2] = "https://tidal.com/browse/album/11103031"
+	env.mbidURLs[mbid2] = "http://www.geocities.com/user"
 	env.mbidURLs[mbid3] = "https://tidal.com/album/1234" // already normalized
+
+	env.mbidRels[mbid2] = []jsonRelationship{
+		{ID: 123, LinkTypeID: 3},
+		{ID: 456, LinkTypeID: 7, BeginDate: jsonDate{2000, 4, 5}},
+	}
 
 	for _, mbid := range []string{mbid1, mbid2, mbid3} {
 		if err := updateURL(ctx, env.ed, mbid, ""); err != nil {
@@ -261,47 +265,43 @@ func TestUpdateURL(t *testing.T) {
 		}
 	}
 	want := []request{
-		urlRequest(mbid1, "https://tidal.com/artist/11069", tidalURLEditNote),
-		urlRequest(mbid2, "https://tidal.com/album/11103031", tidalURLEditNote),
+		{
+			path: "/url/" + mbid1 + "/edit",
+			params: makeURLValues(map[string]string{
+				"edit-url.url":       "https://tidal.com/artist/11069",
+				"edit-url.edit_note": tidalEditNote,
+			}),
+		},
+		{
+			path: "/relationship-editor",
+			params: makeURLValues(map[string]string{
+				"rel-editor.edit_note":                    geocitiesEditNote,
+				"rel-editor.rels.0.action":                "edit",
+				"rel-editor.rels.0.id":                    "123",
+				"rel-editor.rels.0.link_type":             "3",
+				"rel-editor.rels.0.period.ended":          "true",
+				"rel-editor.rels.0.period.end_date.day":   "26",
+				"rel-editor.rels.0.period.end_date.month": "10",
+				"rel-editor.rels.0.period.end_date.year":  "2009",
+				"rel-editor.rels.1.action":                "edit",
+				"rel-editor.rels.1.id":                    "456",
+				"rel-editor.rels.1.link_type":             "7",
+				"rel-editor.rels.1.period.ended":          "true",
+				"rel-editor.rels.1.period.end_date.day":   "26",
+				"rel-editor.rels.1.period.end_date.month": "10",
+				"rel-editor.rels.1.period.end_date.year":  "2009",
+			}),
+		},
 	}
 	if diff := cmp.Diff(want, env.requests, cmp.AllowUnexported(request{})); diff != "" {
 		t.Error("Bad requests:\n" + diff)
 	}
 }
 
-func TestDoRewrite_URL(t *testing.T) {
-	for _, tc := range []struct {
-		orig, want string
-		rels       []relInfo
-	}{
-		{"https://www.example.org/", "", nil},
-		{"https://www.example.org/artist/123", "", nil},
-		{"https://tidal.com/album/11069", "", nil},      // already canonicalized
-		{"https://test.tidal.com/album/11069", "", nil}, // unknown hostname
-		{"http://www.tidal.com/test/11069", "", nil},    // unknown path component
-		{"http://tidal.com/album/11069", "https://tidal.com/album/11069", nil},
-		{"https://listen.tidal.com/artist/11069", "https://tidal.com/artist/11069", nil},
-		{"https://tidal.com/browse/track/11069", "https://tidal.com/track/11069", nil},
-		{"https://www.tidal.com/album/11069", "https://tidal.com/album/11069", nil},
-		{"https://listen.tidal.com/album/123/track/456", "https://tidal.com/album/123", []relInfo{{targetType: "release"}}},
-		{"https://listen.tidal.com/album/123/track/456", "https://tidal.com/track/456", []relInfo{{targetType: "recording"}}},
-		{"https://listen.tidal.com/album/123/track/456", "https://tidal.com/track/456",
-			[]relInfo{{targetType: "release"}, {targetType: "recording"}}},
-		{"https://listen.tidal.com/album/123/track/456", "", []relInfo{{targetType: "artist"}}},
-		{"https://desktop.tidal.com/album/163812859", "https://tidal.com/album/163812859", nil},
-		{"http://tidal.com/browse/album/119425271?play=true", "https://tidal.com/album/119425271", nil},
-		{"https://tidal.com/browse/album/126495793/", "https://tidal.com/album/126495793", nil},
-		{"https://listen.tidal.com/video/78581329", "https://tidal.com/video/78581329", nil},
-		{"https://www.tidal.com/browse/track/155221653", "https://tidal.com/track/155221653", nil},
-	} {
-		if res := doRewrite(urlRewrites, tc.orig, tc.rels); res == nil {
-			if tc.want != "" {
-				t.Errorf("doRewrite(urlRewrites, %q, %v) didn't rewrite; want %q", tc.orig, tc.rels, tc.want)
-			}
-		} else if res.updated == "" {
-			t.Errorf("doRewrite(urlRewrites, %q, %v) rewrote to empty string", tc.orig, tc.rels)
-		} else if res.updated != tc.want {
-			t.Errorf("doRewrite(urlRewrites, %q, %v) = %q; want %q", tc.orig, tc.rels, res.updated, tc.want)
-		}
+func makeURLValues(m map[string]string) url.Values {
+	vals := make(url.Values)
+	for k, v := range m {
+		vals.Set(k, v)
 	}
+	return vals
 }

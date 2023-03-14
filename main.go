@@ -6,6 +6,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,7 +15,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -116,93 +117,94 @@ func updateURL(ctx context.Context, ed *editor, mbid, editNote string) error {
 	if err != nil {
 		return fmt.Errorf("failed getting URL: %v", err)
 	}
-
-	if res := doRewrite(urlRewrites, info.url, info.rels); res == nil {
+	res := doRewrite(urlRewrites, info.url, info.rels)
+	if res == nil {
 		log.Printf("%v: no rewrites found for %v", mbid, info.url)
-	} else {
-		if editNote != "" {
-			res.editNote = editNote
-		}
-		log.Printf("%v: rewriting %v to %v", mbid, info.url, res.updated)
+		return nil
+	}
+	if editNote != "" {
+		res.editNote = editNote
+	}
+
+	if res.rewritten != "" && res.rewritten != info.url {
+		log.Printf("%v: rewriting %v to %v", mbid, info.url, res.rewritten)
 		b, err := ed.post(ctx, "/url/"+mbid+"/edit", map[string]string{
-			"edit-url.url":       res.updated,
+			"edit-url.url":       res.rewritten,
 			"edit-url.edit_note": res.editNote,
 		})
 		if err != nil {
 			return err
 		}
-		if ms := ed.editIDRegexp.FindStringSubmatch(string(b)); ms == nil {
+		ms := ed.editIDRegexp.FindStringSubmatch(string(b))
+		if ms == nil {
 			return errors.New("didn't find edit ID")
-		} else {
-			log.Printf("%v: created edit #%s", mbid, ms[1])
 		}
+		log.Printf("%v: created edit #%s", mbid, ms[1])
 	}
 
-	// TODO: Do additional edits, e.g. updating relationships.
+	if len(res.updatedRels) > 0 {
+		oldRels := make(map[int]*relInfo, len(info.rels))
+		for i := range info.rels {
+			oldRels[info.rels[i].id] = &info.rels[i]
+		}
+		vals := map[string]string{"rel-editor.edit_note": res.editNote}
+		for i, rel := range res.updatedRels {
+			log.Printf("%v: updating relationship %v (%q)", mbid, rel.id, rel.desc(info.url))
+			pre := fmt.Sprintf("rel-editor.rels.%d.", i)
+			if err := setRelEditVals(vals, pre, oldRels[rel.id], &rel); err != nil {
+				return err
+			}
+		}
+		b, err := ed.post(ctx, "/relationship-editor", vals)
+		if err != nil {
+			return err
+		}
+		// This is written by submit_edits in lib/MusicBrainz/Server/Controller/WS/js/Edit.pm,
+		// which oddly doesn't include edit IDs.
+		var data struct {
+			Edits []struct {
+				EditType int `json:"edit_type"`
+				Response int `json:"response"`
+			} `json:"edits"`
+		}
+		if err := json.Unmarshal(b, &data); err != nil {
+			return fmt.Errorf("unmarshaling response: %v", err)
+		}
+		for i, ed := range data.Edits {
+			if ed.Response != 1 {
+				return fmt.Errorf("relationship edit %v with type %v failed: %v", i, ed.EditType, ed.Response)
+			}
+		}
+		log.Printf("%v: created %v relationship edit(s)", mbid, len(data.Edits))
+	}
 
 	return nil
 }
 
-// doRewrite looks for an appropriate rewrite for orig.
-// If orig isn't matched by a rewrite or is unchanged after rewriting, nil is returned.
-func doRewrite(rm rewriteMap, orig string, rels []relInfo) *rewriteResult {
-	for re, fn := range rm {
-		if ms := re.FindStringSubmatch(orig); ms != nil {
-			if res := fn(ms, rels); res == nil || res.updated == orig {
-				return nil // unchanged
-			} else {
-				return res
-			}
-		}
+func setRelEditVals(vals map[string]string, pre string, orig, updated *relInfo) error {
+	if orig == nil {
+		return fmt.Errorf("invalid rel %d", updated.id)
+	} else if *orig == *updated {
+		return fmt.Errorf("no changes for rel %d", updated.id)
 	}
+
+	origCnt := len(vals)
+	if updated.ended != orig.ended {
+		vals[pre+"period.ended"] = fmt.Sprint(updated.ended) // "true" or "false"
+	}
+	if updated.endDate != orig.endDate {
+		vals[pre+"period.end_date.year"] = strconv.Itoa(updated.endDate.year)
+		vals[pre+"period.end_date.month"] = strconv.Itoa(updated.endDate.month)
+		vals[pre+"period.end_date.day"] = strconv.Itoa(updated.endDate.day)
+	}
+	if len(vals) == origCnt {
+		return fmt.Errorf("unsupported update for rel (%+v -> %+v)", *orig, *updated)
+	}
+
+	// The server returns a 400 error if "action" and "link_type" are omitted.
+	vals[pre+"action"] = "edit"
+	vals[pre+"id"] = strconv.Itoa(updated.id)
+	vals[pre+"link_type"] = strconv.Itoa(updated.linkTypeID)
+
 	return nil
 }
-
-// rewriteFunc accepts the match groups returned by FindStringSubmatch and returns
-// a rewritten string. nil may be returned to abort the rewrite.
-type rewriteFunc func(ms []string, rels []relInfo) *rewriteResult
-
-type rewriteResult struct {
-	updated  string // rewritten string
-	editNote string // https://musicbrainz.org/doc/Edit_Note
-}
-
-type rewriteMap map[*regexp.Regexp]rewriteFunc
-
-const tidalURLEditNote = "normalize Tidal streaming URLs: https://tickets.metabrainz.org/browse/MBBE-71"
-
-var urlRewrites = rewriteMap{
-	// Normalize Tidal streaming URLs:
-	//  https://listen.tidal.com/album/114997210 -> https://tidal.com/album/114997210
-	//  https://listen.tidal.com/artist/11069    -> https://tidal.com/artist/11069
-	//  https://tidal.com/browse/album/11103031  -> https://tidal.com/album/11103031
-	//  https://tidal.com/browse/artist/5015356  -> https://tidal.com/artist/5015356
-	//  https://tidal.com/browse/track/120087531 -> https://tidal.com/track/120087531
-	//  (and many other forms; see TestDoRewrite_URL)
-	regexp.MustCompile(`^https?://` + // both http:// and https://
-		`(?:(?:desktop\.|desktop\.stage\.|listen\.|www\.)?tidal\.com)` + // hostname
-		`(?:/browse)?` + // optional /browse component
-		`(/(?:album|artist|track|video|album/\d+/track)/\d+)` + // match significant components, e.g. /album/123
-		`(?:/|\?.*)?` + // trailing slash or query
-		`$`): func(ms []string, rels []relInfo) *rewriteResult {
-		p := ms[1]
-		res := rewriteResult{"https://tidal.com" + p, tidalURLEditNote}
-
-		// If the URL contains both an album and a track, use its relationships to
-		// figure out what it should actually be.
-		if ms := tidalAlbumTrackRegexp.FindStringSubmatch(p); ms != nil {
-			album, track := ms[1], ms[2]
-			if len(filterRels(rels, "recording")) > 0 {
-				res.updated = "https://tidal.com/track/" + track
-			} else if len(filterRels(rels, "release")) > 0 {
-				res.updated = "https://tidal.com/album/" + album
-			} else {
-				return nil // give up if it's related to neither
-			}
-		}
-
-		return &res
-	},
-}
-
-var tidalAlbumTrackRegexp = regexp.MustCompile(`^/album/(\d+)/track/(\d+)$`)

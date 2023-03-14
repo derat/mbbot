@@ -165,7 +165,7 @@ func (ed *editor) send(ctx context.Context, method, path string, vals map[string
 
 	b, err := ioutil.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return b, fmt.Errorf("got %v: %v", resp.StatusCode, resp.Status)
+		return b, fmt.Errorf("got %v: %v (%q)", resp.StatusCode, resp.Status, b)
 	}
 	return b, err
 }
@@ -180,13 +180,31 @@ type urlInfo struct {
 type relInfo struct {
 	id         int    // database ID of link itself
 	linkTypeID int    // database ID of link type, e.g. 978 for artist streaming page
-	beginDate  string // YYYY-MM-DD
-	endDate    string // YYYY-MM-DD
+	linkPhrase string // e.g. "has a fan page at"
+	beginDate  date
+	endDate    date
 	ended      bool
 	backward   bool
 	targetMBID string
 	targetName string
 	targetType string // entity type, e.g. "artist", "release", "recording"
+}
+
+type date struct{ year, month, day int }
+
+// desc returns a string describing the relationship belonging to name,
+// e.g. "[name] has an official homepage at [url]".
+func (rel *relInfo) desc(name string) string {
+	var s string
+	if rel.backward {
+		s = fmt.Sprintf("%s %s %s", name, rel.linkPhrase, rel.targetName)
+	} else {
+		s = fmt.Sprintf("%s %s %s", rel.targetName, rel.linkPhrase, name)
+	}
+	if rel.ended {
+		s += fmt.Sprintf(" until %04d-%02d-%02d", rel.endDate.year, rel.endDate.month, rel.endDate.day)
+	}
+	return s
 }
 
 // filterRels returns relationships to targets of the specified type, e.g. "artist".
@@ -234,16 +252,7 @@ func (ed *editor) getURLInfo(ctx context.Context, mbid string) (*urlInfo, error)
 	}
 	info := urlInfo{url: ent.Decoded}
 	for _, rel := range ent.Relationships {
-		info.rels = append(info.rels, relInfo{
-			id:         rel.ID,
-			linkTypeID: rel.LinkTypeID,
-			beginDate:  rel.BeginDate,
-			endDate:    rel.EndDate,
-			ended:      rel.Ended,
-			targetMBID: rel.Target.GID,
-			targetName: rel.Target.Name,
-			targetType: rel.Target.EntityType,
-		})
+		info.rels = append(info.rels, rel.toRelInfo())
 	}
 	return &info, nil
 }
@@ -263,15 +272,39 @@ type jsonData struct {
 
 // jsonRelationship corresponds to a relationship in jsonData.
 type jsonRelationship struct {
-	ID         int    `json:"id"`
-	LinkTypeID int    `json:"linkTypeID"`
-	Backward   bool   `json:"backward"`
-	BeginDate  string `json:"begin_date"`
-	EndDate    string `json:"end_date"`
-	Ended      bool   `json:"ended"`
-	Target     struct {
+	ID            int      `json:"id"`
+	LinkTypeID    int      `json:"linkTypeID"`
+	Backward      bool     `json:"backward"`
+	BeginDate     jsonDate `json:"begin_date"`
+	EndDate       jsonDate `json:"end_date"`
+	Ended         bool     `json:"ended"`
+	VerbosePhrase string   `json:"verbosePhrase"`
+	Target        struct {
 		Name       string `json:"name"`
 		EntityType string `json:"entityType"`
 		GID        string `json:"gid"`
 	} `json:"target"`
 }
+
+func (jr *jsonRelationship) toRelInfo() relInfo {
+	return relInfo{
+		id:         jr.ID,
+		linkTypeID: jr.LinkTypeID,
+		linkPhrase: jr.VerbosePhrase,
+		beginDate:  jr.BeginDate.toDate(),
+		endDate:    jr.EndDate.toDate(),
+		ended:      jr.Ended,
+		targetMBID: jr.Target.GID,
+		targetName: jr.Target.Name,
+		targetType: jr.Target.EntityType,
+	}
+}
+
+// jsonDate holds the individual components of a date.
+type jsonDate struct {
+	Year  int `json:"year"`
+	Month int `json:"month"`
+	Day   int `json:"day"`
+}
+
+func (jd *jsonDate) toDate() date { return date{jd.Year, jd.Month, jd.Day} }
