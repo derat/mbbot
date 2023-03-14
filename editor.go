@@ -138,7 +138,13 @@ func (ed *editor) send(ctx context.Context, method, path string, vals map[string
 		}
 		if ed.dryRun {
 			log.Printf("POST %v with body %q", u, form.Encode())
-			return []byte(ed.serverURL + "/edit/0"), nil // matched by editIDRegexp
+			switch {
+			case path == "/relationship-editor":
+				return []byte(`{"edits":[{"edit_type":1,"response":1}]}`), nil
+			case strings.HasSuffix(path, "/edit"):
+				return []byte(ed.serverURL + "/edit/0"), nil // matched by editIDRegexp
+			}
+			return nil, nil
 		}
 		body = strings.NewReader(form.Encode())
 	}
