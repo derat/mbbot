@@ -171,7 +171,7 @@ func (ed *editor) send(ctx context.Context, method, path string, vals map[string
 
 	b, err := ioutil.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return b, fmt.Errorf("got %v: %v (%q)", resp.StatusCode, resp.Status, b)
+		return b, fmt.Errorf("got %v: %v", resp.StatusCode, resp.Status)
 	}
 	return b, err
 }

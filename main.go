@@ -34,6 +34,7 @@ func main() {
 	creds := flag.String("creds", filepath.Join(os.Getenv("HOME"), ".mbbot"), "Path to file containing username and password")
 	dryRun := flag.Bool("dry-run", false, "Don't actually perform any edits")
 	editNote := flag.String("edit-note", "", "Edit note to attach to all edits")
+	makeVotable := flag.Bool("make-votable", false, "Force voting on edits")
 	server := flag.String("server", "https://test.musicbrainz.org", "Base URL of MusicBrainz server")
 	flag.Parse()
 
@@ -85,7 +86,7 @@ func main() {
 				break
 			} else if err != nil {
 				log.Fatal("Failed reading MBID: ", err)
-			} else if err := updateURL(ctx, ed, mbid, *editNote); err != nil {
+			} else if err := updateURL(ctx, ed, mbid, *editNote, *makeVotable); err != nil {
 				log.Printf("Failed rewriting %q: %v", mbid, err)
 			}
 		}
@@ -116,8 +117,10 @@ func cancelEdit(ctx context.Context, ed *editor, id int, editNote string) error 
 
 // updateURL attempts to update the URL with the specified MBID.
 // If editNote is non-empty, it will be attached to the edit.
+// If makeVotable is true, voting will be forced.
 // If no updates are performed, a nil error is returned.
-func updateURL(ctx context.Context, ed *editor, mbid, editNote string) error {
+func updateURL(ctx context.Context, ed *editor, mbid, editNote string,
+	makeVotable bool) error {
 	info, err := ed.getURLInfo(ctx, mbid)
 	if err != nil {
 		return fmt.Errorf("failed getting URL: %v", err)
@@ -133,10 +136,14 @@ func updateURL(ctx context.Context, ed *editor, mbid, editNote string) error {
 
 	if res.rewritten != "" && res.rewritten != info.url {
 		log.Printf("%v: rewriting %v to %v", mbid, info.url, res.rewritten)
-		b, err := ed.post(ctx, "/url/"+mbid+"/edit", map[string]string{
+		vals := map[string]string{
 			"edit-url.url":       res.rewritten,
 			"edit-url.edit_note": res.editNote,
-		})
+		}
+		if makeVotable {
+			vals["edit-url.make_votable"] = "1"
+		}
+		b, err := ed.post(ctx, "/url/"+mbid+"/edit", vals)
 		if err != nil {
 			return err
 		}
@@ -153,6 +160,9 @@ func updateURL(ctx context.Context, ed *editor, mbid, editNote string) error {
 			oldRels[info.rels[i].id] = &info.rels[i]
 		}
 		vals := map[string]string{"rel-editor.edit_note": res.editNote}
+		if makeVotable {
+			vals["rel-editor.make_votable"] = "1"
+		}
 		for i, rel := range res.updatedRels {
 			log.Printf("%v: updating relationship %v (%q)", mbid, rel.id, rel.desc(info.url))
 			pre := fmt.Sprintf("rel-editor.rels.%d.", i)

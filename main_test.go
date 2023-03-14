@@ -260,8 +260,8 @@ func TestUpdateURL(t *testing.T) {
 	}
 
 	for _, mbid := range []string{mbid1, mbid2, mbid3} {
-		if err := updateURL(ctx, env.ed, mbid, ""); err != nil {
-			t.Errorf("updateURL(ctx, ed, %q, %q) failed: %v", mbid, "", err)
+		if err := updateURL(ctx, env.ed, mbid, "", false); err != nil {
+			t.Errorf("updateURL(ctx, ed, %q, %q, false) failed: %v", mbid, "", err)
 		}
 	}
 	want := []request{
