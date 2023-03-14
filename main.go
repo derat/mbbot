@@ -37,6 +37,11 @@ func main() {
 	server := flag.String("server", "https://test.musicbrainz.org", "Base URL of MusicBrainz server")
 	flag.Parse()
 
+	if flag.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "Positional args are not accepted")
+		os.Exit(2)
+	}
+
 	// Validate the action before we bother logging in.
 	if *action == "" {
 		fmt.Fprintln(os.Stderr, "Must supply action via -action")
