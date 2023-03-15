@@ -50,15 +50,15 @@ type editorOption func(ed *editor)
 func editorRateLimit(limit rate.Limit) editorOption {
 	return func(ed *editor) { ed.limiter.SetLimit(limit) }
 }
+func editorDryRun(dryRun bool) editorOption {
+	return func(ed *editor) { ed.dryRun = dryRun }
+}
 
 func newEditor(ctx context.Context, serverURL, user, pass string, opts ...editorOption) (*editor, error) {
+	// Wait until after login to initialize the rate-limiter.
 	ed := editor{
 		serverURL:    serverURL,
-		limiter:      rate.NewLimiter(maxQPS, 1),
 		editIDRegexp: regexp.MustCompile(regexp.QuoteMeta(serverURL) + `/edit/(\d+)\b`),
-	}
-	for _, opt := range opts {
-		opt(&ed)
 	}
 
 	var err error
@@ -106,6 +106,12 @@ func newEditor(ctx context.Context, serverURL, user, pass string, opts ...editor
 		return nil, errors.New("missing profile link")
 	}
 
+	// Apply options here so they don't affect login.
+	ed.limiter = rate.NewLimiter(maxQPS, 1)
+	for _, opt := range opts {
+		opt(&ed)
+	}
+
 	return &ed, nil
 }
 
@@ -124,8 +130,10 @@ func (ed *editor) post(ctx context.Context, path string, vals map[string]string)
 // The response body is returned. All non-200 responses (after following redirects)
 // cause an error to be returned.
 func (ed *editor) send(ctx context.Context, method, path string, vals map[string]string) ([]byte, error) {
-	if err := ed.limiter.Wait(ctx); err != nil {
-		return nil, err
+	if ed.limiter != nil {
+		if err := ed.limiter.Wait(ctx); err != nil {
+			return nil, err
+		}
 	}
 
 	u := ed.serverURL + path

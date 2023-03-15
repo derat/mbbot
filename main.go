@@ -61,11 +61,10 @@ func main() {
 	ctx := context.Background()
 
 	log.Print("Logging in as ", user)
-	ed, err := newEditor(ctx, *server, user, pass)
+	ed, err := newEditor(ctx, *server, user, pass, editorDryRun(*dryRun))
 	if err != nil {
 		log.Fatal("Failed logging in: ", err)
 	}
-	ed.dryRun = *dryRun
 
 	switch *action {
 	case actionCancel:
