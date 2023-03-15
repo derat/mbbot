@@ -278,18 +278,21 @@ type jsonData struct {
 
 // jsonRelationship corresponds to a relationship in jsonData.
 type jsonRelationship struct {
-	ID            int      `json:"id"`
-	LinkTypeID    int      `json:"linkTypeID"`
-	Backward      bool     `json:"backward"`
-	BeginDate     jsonDate `json:"begin_date"`
-	EndDate       jsonDate `json:"end_date"`
-	Ended         bool     `json:"ended"`
-	VerbosePhrase string   `json:"verbosePhrase"`
-	Target        struct {
-		Name       string `json:"name"`
-		EntityType string `json:"entityType"`
-		GID        string `json:"gid"`
-	} `json:"target"`
+	ID            int        `json:"id"`
+	LinkTypeID    int        `json:"linkTypeID"`
+	Backward      bool       `json:"backward"`
+	BeginDate     jsonDate   `json:"begin_date"`
+	EndDate       jsonDate   `json:"end_date"`
+	Ended         bool       `json:"ended"`
+	VerbosePhrase string     `json:"verbosePhrase"`
+	Target        jsonTarget `json:"target"`
+}
+
+// jsonTarget describes the target entity within jsonRelationship.
+type jsonTarget struct {
+	Name       string `json:"name"`
+	EntityType string `json:"entityType"`
+	GID        string `json:"gid"`
 }
 
 func (jr *jsonRelationship) toRelInfo() relInfo {

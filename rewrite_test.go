@@ -52,6 +52,19 @@ func TestDoRewrite(t *testing.T) {
 				{targetType: "artist", beginDate: d, ended: true, endDate: geocitiesJapanEndDate},
 				{targetType: "release", beginDate: d, ended: true, endDate: geocitiesJapanEndDate},
 			}},
+
+		// Tidal Store (MBBE-63)
+		{"https://store.tidal.com/artist/123", nil, "", nil}, // no relationships
+		{"https://store.tidal.com/artist/123",
+			[]relInfo{{targetType: "artist", linkTypeID: 176, ended: true, endDate: d}}, "", nil}, // already ended
+		{"https://store.tidal.com/artist/123", []relInfo{{targetType: "artist", linkTypeID: 176}},
+			"", []relInfo{{targetType: "artist", linkTypeID: 176, ended: true, endDate: tidalStoreEndDate}}},
+		{"https://store.tidal.com/artist/123", []relInfo{{targetType: "artist", linkTypeID: 194, ended: true, endDate: d}},
+			"", []relInfo{{targetType: "artist", linkTypeID: 176, ended: true, endDate: d}}},
+		{"https://tidal.com/store/album/123", []relInfo{{targetType: "release", linkTypeID: 85}},
+			"", []relInfo{{targetType: "release", linkTypeID: 74, ended: true, endDate: tidalStoreEndDate}}},
+		{"https://tidal.com/us/store/track/123", []relInfo{{targetType: "recording", linkTypeID: 268}},
+			"", []relInfo{{targetType: "recording", linkTypeID: 254, ended: true, endDate: tidalStoreEndDate}}},
 	} {
 		if tc.rewritten == "" {
 			tc.rewritten = tc.url

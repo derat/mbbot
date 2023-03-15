@@ -172,7 +172,7 @@ func updateURL(ctx context.Context, ed *editor, mbid, editNote string,
 		}
 		b, err := ed.post(ctx, "/relationship-editor", vals)
 		if err != nil {
-			return err
+			return fmt.Errorf("%v (%q)", err, b)
 		}
 		// This is written by submit_edits in lib/MusicBrainz/Server/Controller/WS/js/Edit.pm,
 		// which oddly doesn't include edit IDs.
@@ -204,6 +204,9 @@ func setRelEditVals(vals map[string]string, pre string, orig, updated *relInfo) 
 	}
 
 	origCnt := len(vals)
+	if updated.linkTypeID != orig.linkTypeID {
+		vals[pre+"link_type"] = strconv.Itoa(updated.linkTypeID)
+	}
 	if updated.ended != orig.ended {
 		vals[pre+"period.ended"] = fmt.Sprint(updated.ended) // "true" or "false"
 	}

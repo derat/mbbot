@@ -245,28 +245,33 @@ func TestUpdateURL(t *testing.T) {
 	defer env.close()
 
 	const (
-		mbid1 = "40d2c699-f615-4f95-b212-24c344572333"
-		mbid2 = "56313079-1796-4fb8-add5-d8cf117f3ba5"
-		mbid3 = "e9ce6782-29e6-4f09-82b0-0abd18061e32"
+		tidalMBID      = "40d2c699-f615-4f95-b212-24c344572333"
+		geocitiesMBID  = "56313079-1796-4fb8-add5-d8cf117f3ba5"
+		tidalStoreMBID = "545eb1f2-630f-47ff-ad38-9b15e7c0cae9"
+		doneMBID       = "e9ce6782-29e6-4f09-82b0-0abd18061e32"
 	)
 
-	env.mbidURLs[mbid1] = "http://listen.tidal.com/artist/11069"
-	env.mbidURLs[mbid2] = "http://www.geocities.com/user"
-	env.mbidURLs[mbid3] = "https://tidal.com/album/1234" // already normalized
+	env.mbidURLs[tidalMBID] = "http://listen.tidal.com/artist/11069"
+	env.mbidURLs[geocitiesMBID] = "http://www.geocities.com/user"
+	env.mbidURLs[tidalStoreMBID] = "https://store.tidal.com/artist/12345"
+	env.mbidURLs[doneMBID] = "https://tidal.com/album/1234" // already normalized
 
-	env.mbidRels[mbid2] = []jsonRelationship{
+	env.mbidRels[geocitiesMBID] = []jsonRelationship{
 		{ID: 123, LinkTypeID: 3},
 		{ID: 456, LinkTypeID: 7, BeginDate: jsonDate{2000, 4, 5}},
 	}
+	env.mbidRels[tidalStoreMBID] = []jsonRelationship{
+		{ID: 789, LinkTypeID: 85, Target: jsonTarget{EntityType: "release"}},
+	}
 
-	for _, mbid := range []string{mbid1, mbid2, mbid3} {
+	for _, mbid := range []string{tidalMBID, geocitiesMBID, tidalStoreMBID, doneMBID} {
 		if err := updateURL(ctx, env.ed, mbid, "", false); err != nil {
 			t.Errorf("updateURL(ctx, ed, %q, %q, false) failed: %v", mbid, "", err)
 		}
 	}
 	want := []request{
 		{
-			path: "/url/" + mbid1 + "/edit",
+			path: "/url/" + tidalMBID + "/edit",
 			params: makeURLValues(map[string]string{
 				"edit-url.url":       "https://tidal.com/artist/11069",
 				"edit-url.edit_note": tidalEditNote,
@@ -290,6 +295,19 @@ func TestUpdateURL(t *testing.T) {
 				"rel-editor.rels.1.period.end_date.day":   "26",
 				"rel-editor.rels.1.period.end_date.month": "10",
 				"rel-editor.rels.1.period.end_date.year":  "2009",
+			}),
+		},
+		{
+			path: "/relationship-editor",
+			params: makeURLValues(map[string]string{
+				"rel-editor.edit_note":                    tidalStoreEditNote,
+				"rel-editor.rels.0.action":                "edit",
+				"rel-editor.rels.0.id":                    "789",
+				"rel-editor.rels.0.link_type":             "74",
+				"rel-editor.rels.0.period.ended":          "true",
+				"rel-editor.rels.0.period.end_date.day":   "20",
+				"rel-editor.rels.0.period.end_date.month": "10",
+				"rel-editor.rels.0.period.end_date.year":  "2022",
 			}),
 		},
 	}

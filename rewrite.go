@@ -3,7 +3,9 @@
 
 package main
 
-import "regexp"
+import (
+	"regexp"
+)
 
 // doRewrite looks for an appropriate rewrite for orig.
 // If orig isn't matched by a rewrite or is unchanged after rewriting, nil is returned.
@@ -33,14 +35,17 @@ type rewriteResult struct {
 type rewriteMap map[*regexp.Regexp]rewriteFunc
 
 const (
-	tidalEditNote     = "normalize Tidal streaming URLs: https://tickets.metabrainz.org/browse/MBBE-71"
-	geocitiesEditNote = "end GeoCities relationships: https://tickets.metabrainz.org/browse/MBBE-47"
+	tidalEditNote      = "normalize Tidal streaming URLs: https://tickets.metabrainz.org/browse/MBBE-71"
+	geocitiesEditNote  = "end GeoCities relationships: https://tickets.metabrainz.org/browse/MBBE-47"
+	tidalStoreEditNote = "end Tidal Store relationships: https://tickets.metabrainz.org/browse/MBBE-63"
 )
 
 var (
 	// See https://en.wikipedia.org/wiki/Yahoo!_GeoCities.
 	geocitiesEndDate      = date{2009, 10, 26}
 	geocitiesJapanEndDate = date{2019, 3, 31}
+
+	tidalStoreEndDate = date{2022, 10, 20}
 )
 
 var tidalAlbumTrackRegexp = regexp.MustCompile(`^/album/(\d+)/track/(\d+)$`)
@@ -98,6 +103,42 @@ var urlRewrites = rewriteMap{
 			if !rel.ended {
 				rel.ended = true
 				rel.endDate = endDate
+				res.updatedRels = append(res.updatedRels, rel)
+			}
+		}
+		if len(res.updatedRels) == 0 {
+			return nil
+		}
+		return &res
+	},
+
+	// MBBE-63: Mark Tidal Store URL relationships as ended.
+	regexp.MustCompile(`^https?://` +
+		`(store\.tidal\.com|tidal\.com(/[a-zA-Z]{2})?/store)` +
+		`/.*` +
+		`$`): func(ms []string, rels []relInfo) *rewriteResult {
+		res := rewriteResult{
+			rewritten: ms[0], // leave the URL alone
+			editNote:  tidalStoreEditNote,
+		}
+		// TODO: The server returns an error if an edit would create a duplicate relationship
+		// (i.e. same link type, source, and target). This code could try to handle that case, but
+		// I've instead manually created edits to clean up the few URLs with multiple relationships.
+		for _, rel := range rels {
+			orig := rel
+			switch rel.targetType {
+			case "artist":
+				rel.linkTypeID = 176 // "music can be purchased for download at"
+			case "release":
+				rel.linkTypeID = 74 // "can be purchased for download at"
+			case "recording":
+				rel.linkTypeID = 254 // "can be purchased for download at"
+			}
+			if !rel.ended {
+				rel.ended = true
+				rel.endDate = tidalStoreEndDate
+			}
+			if rel != orig {
 				res.updatedRels = append(res.updatedRels, rel)
 			}
 		}
