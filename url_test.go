@@ -4,9 +4,133 @@
 package main
 
 import (
+	"context"
+	"net/url"
 	"reflect"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 )
+
+func TestUpdateURL(t *testing.T) {
+	ctx := context.Background()
+	env := newTestEnv(ctx, t)
+	defer env.close()
+
+	const (
+		tidalMBID      = "40d2c699-f615-4f95-b212-24c344572333"
+		geocitiesMBID  = "56313079-1796-4fb8-add5-d8cf117f3ba5"
+		tidalStoreMBID = "545eb1f2-630f-47ff-ad38-9b15e7c0cae9"
+		recmusicMBID   = "4e135691-fdc1-4127-ab69-67095aa09c44"
+		doneMBID       = "e9ce6782-29e6-4f09-82b0-0abd18061e32"
+
+		recmusicArtistMBID = "63a5c79f-697e-47e0-975d-1e2087a454aa"
+	)
+
+	env.mbidURLs[tidalMBID] = "http://listen.tidal.com/artist/11069"
+	env.mbidURLs[geocitiesMBID] = "http://www.geocities.com/user"
+	env.mbidURLs[tidalStoreMBID] = "https://store.tidal.com/artist/12345"
+	env.mbidURLs[recmusicMBID] = "https://recmusic.jp/album/?id=1010526534"
+	env.mbidURLs[doneMBID] = "https://tidal.com/album/1234" // already normalized
+
+	env.mbidRels[geocitiesMBID] = []jsonRelationship{
+		{ID: 123, LinkTypeID: 3},
+		{ID: 456, LinkTypeID: 7, BeginDate: jsonDate{2000, 4, 5}},
+	}
+	env.mbidRels[tidalStoreMBID] = []jsonRelationship{
+		{ID: 789, LinkTypeID: 85, Target: jsonTarget{EntityType: "release"}, Backward: true},
+	}
+	env.mbidRels[recmusicMBID] = []jsonRelationship{
+		{ID: 423, LinkTypeID: 980, Target: jsonTarget{EntityType: "release", GID: recmusicArtistMBID}, Backward: true},
+	}
+
+	for _, mbid := range []string{tidalMBID, geocitiesMBID, tidalStoreMBID, recmusicMBID, doneMBID} {
+		if err := updateURL(ctx, env.srv, mbid, "", false); err != nil {
+			t.Errorf("updateURL(ctx, srv, %q, %q, false) failed: %v", mbid, "", err)
+		}
+	}
+	want := []request{
+		{
+			path: "/url/" + tidalMBID + "/edit",
+			params: makeURLValues(map[string]string{
+				"edit-url.url":       "https://tidal.com/artist/11069",
+				"edit-url.edit_note": tidalEditNote,
+			}),
+		},
+		{
+			path: "/relationship-editor",
+			params: makeURLValues(map[string]string{
+				"rel-editor.edit_note":                    geocitiesEditNote,
+				"rel-editor.rels.0.action":                "edit",
+				"rel-editor.rels.0.id":                    "123",
+				"rel-editor.rels.0.link_type":             "3",
+				"rel-editor.rels.0.period.ended":          "1",
+				"rel-editor.rels.0.period.end_date.day":   "26",
+				"rel-editor.rels.0.period.end_date.month": "10",
+				"rel-editor.rels.0.period.end_date.year":  "2009",
+				"rel-editor.rels.1.action":                "edit",
+				"rel-editor.rels.1.id":                    "456",
+				"rel-editor.rels.1.link_type":             "7",
+				"rel-editor.rels.1.period.ended":          "1",
+				"rel-editor.rels.1.period.end_date.day":   "26",
+				"rel-editor.rels.1.period.end_date.month": "10",
+				"rel-editor.rels.1.period.end_date.year":  "2009",
+			}),
+		},
+		{
+			path: "/relationship-editor",
+			params: makeURLValues(map[string]string{
+				"rel-editor.edit_note":                    tidalStoreEditNote,
+				"rel-editor.rels.0.action":                "edit",
+				"rel-editor.rels.0.id":                    "789",
+				"rel-editor.rels.0.link_type":             "74",
+				"rel-editor.rels.0.period.ended":          "1",
+				"rel-editor.rels.0.period.end_date.day":   "20",
+				"rel-editor.rels.0.period.end_date.month": "10",
+				"rel-editor.rels.0.period.end_date.year":  "2022",
+			}),
+		},
+		{
+			path: "/relationship-editor",
+			params: makeURLValues(map[string]string{
+				"rel-editor.edit_note":                    recmusicEditNote,
+				"rel-editor.rels.0.action":                "edit",
+				"rel-editor.rels.0.id":                    "423",
+				"rel-editor.rels.0.link_type":             "980",
+				"rel-editor.rels.0.period.ended":          "1",
+				"rel-editor.rels.0.period.end_date.day":   "1",
+				"rel-editor.rels.0.period.end_date.month": "10",
+				"rel-editor.rels.0.period.end_date.year":  "2021",
+			}),
+		},
+		{
+			path: "/relationship-editor",
+			params: makeURLValues(map[string]string{
+				"rel-editor.edit_note":                      recmusicEditNote,
+				"rel-editor.rels.0.action":                  "add",
+				"rel-editor.rels.0.link_type":               "980",
+				"rel-editor.rels.0.period.begin_date.day":   "1",
+				"rel-editor.rels.0.period.begin_date.month": "10",
+				"rel-editor.rels.0.period.begin_date.year":  "2021",
+				"rel-editor.rels.0.entity.0.gid":            recmusicArtistMBID,
+				"rel-editor.rels.0.entity.0.type":           "release",
+				"rel-editor.rels.0.entity.1.url":            "https://music.tower.jp/album/detail/1010526534",
+				"rel-editor.rels.0.entity.1.type":           "url",
+			}),
+		},
+	}
+	if diff := cmp.Diff(want, env.requests, cmp.AllowUnexported(request{})); diff != "" {
+		t.Error("Bad requests:\n" + diff)
+	}
+}
+
+func makeURLValues(m map[string]string) url.Values {
+	vals := make(url.Values)
+	for k, v := range m {
+		vals.Set(k, v)
+	}
+	return vals
+}
 
 func TestDoRewrite(t *testing.T) {
 	d := date{2003, 7, 9} // arbitrary

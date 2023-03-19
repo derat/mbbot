@@ -4,12 +4,104 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"log"
 	"regexp"
 )
 
-// TODO: Rename this file to url.go and make everything URL-specific.
-// I don't think this code will end up being useful for rewriting anything else.
+// updateURL attempts to update the URL with the specified MBID.
+// If editNote is non-empty, it will be attached to the edit.
+// If makeVotable is true, voting will be forced.
+// If no updates are performed, a nil error is returned.
+func updateURL(ctx context.Context, srv *server, mbid, editNote string, makeVotable bool) error {
+	info, err := getURLInfo(ctx, srv, mbid)
+	if err != nil {
+		return fmt.Errorf("failed getting URL: %v", err)
+	}
+	res := doRewrite(urlRewrites, info.url, info.rels)
+	if res == nil {
+		log.Printf("%v: no rewrites found for %v", mbid, info.url)
+		return nil
+	}
+	if editNote != "" {
+		res.editNote = editNote
+	}
+
+	if res.rewritten != "" && res.rewritten != info.url {
+		log.Printf("%v: rewriting %v to %v", mbid, info.url, res.rewritten)
+		vals := map[string]string{
+			"edit-url.url":       res.rewritten,
+			"edit-url.edit_note": res.editNote,
+		}
+		if makeVotable {
+			vals["edit-url.make_votable"] = "1"
+		}
+		b, err := srv.post(ctx, "/url/"+mbid+"/edit", vals)
+		if err != nil {
+			return err
+		}
+		ms := srv.editIDRegexp.FindStringSubmatch(string(b))
+		if ms == nil {
+			return errors.New("didn't find edit ID")
+		}
+		log.Printf("%v: created edit #%s", mbid, ms[1])
+	}
+
+	if len(res.updatedRels) > 0 {
+		oldRels := make(map[int]*relInfo, len(info.rels))
+		for i := range info.rels {
+			oldRels[info.rels[i].id] = &info.rels[i]
+		}
+		vals := make(map[string]string)
+		for i, rel := range res.updatedRels {
+			log.Printf("%v: editing relationship %v (%q)", mbid, rel.id, rel.desc(info.url))
+			pre := fmt.Sprintf("rel-editor.rels.%d.", i)
+			if err := setRelEditVals(vals, pre, rel, oldRels[rel.id]); err != nil {
+				return err
+			}
+		}
+		if ids, err := postRelEdit(ctx, srv, vals, res.editNote, makeVotable); err != nil {
+			return err
+		} else {
+			log.Printf("%v: edited %v relationship(s)", mbid, len(ids))
+		}
+	}
+
+	for _, info := range res.newURLs {
+		vals := make(map[string]string)
+		for i, rel := range info.rels {
+			log.Printf("%v: adding relationship (%q)", mbid, rel.desc(info.url))
+			pre := fmt.Sprintf("rel-editor.rels.%d.", i)
+			if err := setRelEditVals(vals, pre, rel, nil); err != nil {
+				return err
+			}
+			// I think that the "normal" ordering sorts entities by type name, so we should use
+			// [artist,url], [recording,url], and [release,url], but [url,work]. So weird.
+			if (rel.backward && rel.targetType > "url") || (!rel.backward && rel.targetType < "url") {
+				return fmt.Errorf("incorrect direction for relationship %q", rel.desc(info.url))
+			}
+			urlPre, targetPre := pre+"entity.0", pre+"entity.1"
+			if rel.backward {
+				urlPre, targetPre = targetPre, urlPre
+			}
+			vals[urlPre+".url"] = info.url
+			vals[urlPre+".type"] = "url"
+			vals[targetPre+".gid"] = rel.targetMBID
+			vals[targetPre+".type"] = rel.targetType
+		}
+		if ids, err := postRelEdit(ctx, srv, vals, res.editNote, makeVotable); err != nil {
+			return err
+		} else {
+			for _, id := range ids {
+				log.Printf("%v: added relationship %v", mbid, id)
+			}
+		}
+	}
+
+	return nil
+}
 
 // doRewrite looks for an appropriate rewrite for orig.
 // If orig isn't matched by a rewrite or is unchanged after rewriting, nil is returned.
