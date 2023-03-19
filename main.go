@@ -61,7 +61,7 @@ func main() {
 	ctx := context.Background()
 
 	log.Print("Logging in as ", user)
-	ed, err := newEditor(ctx, *server, user, pass, editorDryRun(*dryRun))
+	srv, err := newServer(ctx, *server, user, pass, serverDryRun(*dryRun))
 	if err != nil {
 		log.Fatal("Failed logging in: ", err)
 	}
@@ -74,7 +74,7 @@ func main() {
 				break
 			} else if err != nil {
 				log.Fatal("Failed reading edit ID: ", err)
-			} else if err := cancelEdit(ctx, ed, id, *editNote); err != nil {
+			} else if err := cancelEdit(ctx, srv, id, *editNote); err != nil {
 				log.Printf("Failed canceling edit %v: %v", id, err)
 			}
 		}
@@ -85,7 +85,7 @@ func main() {
 				break
 			} else if err != nil {
 				log.Fatal("Failed reading MBID: ", err)
-			} else if err := updateURL(ctx, ed, mbid, *editNote, *makeVotable); err != nil {
+			} else if err := updateURL(ctx, srv, mbid, *editNote, *makeVotable); err != nil {
 				log.Printf("Failed rewriting %q: %v", mbid, err)
 			}
 		}
@@ -106,9 +106,9 @@ func readCreds(p string) (user, pass string, err error) {
 }
 
 // cancelEdit cancels the MusicBrainz edit with the supplied ID.
-func cancelEdit(ctx context.Context, ed *editor, id int, editNote string) error {
+func cancelEdit(ctx context.Context, srv *server, id int, editNote string) error {
 	log.Printf("Canceling edit %d", id)
-	_, err := ed.post(ctx, fmt.Sprintf("/edit/%d/cancel", id), map[string]string{
+	_, err := srv.post(ctx, fmt.Sprintf("/edit/%d/cancel", id), map[string]string{
 		"confirm.edit_note": editNote,
 	})
 	return err
@@ -118,9 +118,9 @@ func cancelEdit(ctx context.Context, ed *editor, id int, editNote string) error 
 // If editNote is non-empty, it will be attached to the edit.
 // If makeVotable is true, voting will be forced.
 // If no updates are performed, a nil error is returned.
-func updateURL(ctx context.Context, ed *editor, mbid, editNote string,
+func updateURL(ctx context.Context, srv *server, mbid, editNote string,
 	makeVotable bool) error {
-	info, err := ed.getURLInfo(ctx, mbid)
+	info, err := srv.getURLInfo(ctx, mbid)
 	if err != nil {
 		return fmt.Errorf("failed getting URL: %v", err)
 	}
@@ -142,11 +142,11 @@ func updateURL(ctx context.Context, ed *editor, mbid, editNote string,
 		if makeVotable {
 			vals["edit-url.make_votable"] = "1"
 		}
-		b, err := ed.post(ctx, "/url/"+mbid+"/edit", vals)
+		b, err := srv.post(ctx, "/url/"+mbid+"/edit", vals)
 		if err != nil {
 			return err
 		}
-		ms := ed.editIDRegexp.FindStringSubmatch(string(b))
+		ms := srv.editIDRegexp.FindStringSubmatch(string(b))
 		if ms == nil {
 			return errors.New("didn't find edit ID")
 		}
@@ -166,7 +166,7 @@ func updateURL(ctx context.Context, ed *editor, mbid, editNote string,
 				return err
 			}
 		}
-		if ids, err := postRelEdit(ctx, ed, vals, res.editNote, makeVotable); err != nil {
+		if ids, err := postRelEdit(ctx, srv, vals, res.editNote, makeVotable); err != nil {
 			return err
 		} else {
 			log.Printf("%v: edited %v relationship(s)", mbid, len(ids))
@@ -195,7 +195,7 @@ func updateURL(ctx context.Context, ed *editor, mbid, editNote string,
 			vals[targetPre+".gid"] = rel.targetMBID
 			vals[targetPre+".type"] = rel.targetType
 		}
-		if ids, err := postRelEdit(ctx, ed, vals, res.editNote, makeVotable); err != nil {
+		if ids, err := postRelEdit(ctx, srv, vals, res.editNote, makeVotable); err != nil {
 			return err
 		} else {
 			for _, id := range ids {
@@ -262,7 +262,7 @@ func setRelEditVals(vals map[string]string, pre string, rel relInfo, orig *relIn
 // postRelEdit posts vals to /relationship-editor.
 // IDs of created relationships are returned.
 // If existing relationships are edited, IDs are 0.
-func postRelEdit(ctx context.Context, ed *editor, vals map[string]string,
+func postRelEdit(ctx context.Context, srv *server, vals map[string]string,
 	editNote string, makeVotable bool) ([]int, error) {
 	// Set additional parameters.
 	vals["rel-editor.edit_note"] = editNote
@@ -270,7 +270,7 @@ func postRelEdit(ctx context.Context, ed *editor, vals map[string]string,
 		vals["rel-editor.make_votable"] = "1"
 	}
 
-	b, err := ed.post(ctx, "/relationship-editor", vals)
+	b, err := srv.post(ctx, "/relationship-editor", vals)
 	if err != nil {
 		return nil, fmt.Errorf("%v (%q)", err, b)
 	}

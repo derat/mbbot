@@ -28,10 +28,10 @@ const (
 )
 
 type testEnv struct {
-	t   *testing.T
-	srv *httptest.Server
-	mux *http.ServeMux
-	ed  *editor
+	t       *testing.T
+	testSrv *httptest.Server
+	mux     *http.ServeMux
+	srv     *server
 
 	mbidURLs map[string]string // MBID-to-URL mappings to return
 	mbidRels map[string][]jsonRelationship
@@ -55,7 +55,7 @@ func newTestEnv(ctx context.Context, t *testing.T) *testEnv {
 	env.mux.HandleFunc("/login", env.handleLogin)
 	env.mux.HandleFunc("/", env.handleDefault)
 
-	env.srv = httptest.NewServer(env.mux)
+	env.testSrv = httptest.NewServer(env.mux)
 	toClose := &env
 	defer func() {
 		if toClose != nil {
@@ -64,7 +64,7 @@ func newTestEnv(ctx context.Context, t *testing.T) *testEnv {
 	}()
 
 	var err error
-	env.ed, err = newEditor(ctx, env.srv.URL, testUser, testPass, editorRateLimit(rate.Inf))
+	env.srv, err = newServer(ctx, env.testSrv.URL, testUser, testPass, serverRateLimit(rate.Inf))
 	if err != nil {
 		t.Fatal("Failed logging in:", err)
 	}
@@ -74,7 +74,7 @@ func newTestEnv(ctx context.Context, t *testing.T) *testEnv {
 }
 
 func (env *testEnv) close() {
-	env.srv.Close()
+	env.testSrv.Close()
 	log.SetOutput(env.origLogDest)
 }
 
@@ -120,7 +120,7 @@ func (env *testEnv) handleLogin(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 
-		// Return a minimal page with the profile link that the editor code looks
+		// Return a minimal page with the profile link that the server code looks
 		// for to check whether login was successful.
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, `<!DOCTYPE html>
@@ -194,7 +194,7 @@ func (env *testEnv) handlePost(w http.ResponseWriter, req *http.Request) {
   <body>
     <p>Thank you, your <a href="%s/edit/123">edit</a> (#123) has been entered into the edit queue for peer review.</p>
   </body>
-</html>`, env.srv.URL)
+</html>`, env.testSrv.URL)
 	case req.URL.Path == "/relationship-editor":
 		// Just write a bogus JSON object reporting one successful edit.
 		w.Header().Set("Content-Type", "application/json")
@@ -225,8 +225,8 @@ func TestCancelEdit(t *testing.T) {
 		id       = 123
 		editNote = "testing edit cancelation"
 	)
-	if err := cancelEdit(ctx, env.ed, id, editNote); err != nil {
-		t.Fatalf("cancelEdit(ctx, ed, %d, %q) failed: %v", id, editNote, err)
+	if err := cancelEdit(ctx, env.srv, id, editNote); err != nil {
+		t.Fatalf("cancelEdit(ctx, srv, %d, %q) failed: %v", id, editNote, err)
 	}
 	want := []request{{
 		path: fmt.Sprintf("/edit/%d/cancel", id),
@@ -272,8 +272,8 @@ func TestUpdateURL(t *testing.T) {
 	}
 
 	for _, mbid := range []string{tidalMBID, geocitiesMBID, tidalStoreMBID, recmusicMBID, doneMBID} {
-		if err := updateURL(ctx, env.ed, mbid, "", false); err != nil {
-			t.Errorf("updateURL(ctx, ed, %q, %q, false) failed: %v", mbid, "", err)
+		if err := updateURL(ctx, env.srv, mbid, "", false); err != nil {
+			t.Errorf("updateURL(ctx, srv, %q, %q, false) failed: %v", mbid, "", err)
 		}
 	}
 	want := []request{

@@ -29,8 +29,8 @@ const (
 	sessionCookie = "musicbrainz_server_session"
 )
 
-// editor communicates with the MusicBrainz website.
-type editor struct {
+// server communicates with the MusicBrainz website.
+type server struct {
 	serverURL    string // e.g. "https://musicbrainz.org"
 	client       http.Client
 	limiter      *rate.Limiter
@@ -45,30 +45,30 @@ var (
 	csrfTokenRegexp      = regexp.MustCompile(`<input name="csrf_token"\s+type="hidden"\s+value="([^"]+)"`)
 )
 
-type editorOption func(ed *editor)
+type serverOption func(srv *server)
 
-func editorRateLimit(limit rate.Limit) editorOption {
-	return func(ed *editor) { ed.limiter.SetLimit(limit) }
+func serverRateLimit(limit rate.Limit) serverOption {
+	return func(srv *server) { srv.limiter.SetLimit(limit) }
 }
-func editorDryRun(dryRun bool) editorOption {
-	return func(ed *editor) { ed.dryRun = dryRun }
+func serverDryRun(dryRun bool) serverOption {
+	return func(srv *server) { srv.dryRun = dryRun }
 }
 
-func newEditor(ctx context.Context, serverURL, user, pass string, opts ...editorOption) (*editor, error) {
+func newServer(ctx context.Context, serverURL, user, pass string, opts ...serverOption) (*server, error) {
 	// Wait until after login to initialize the rate-limiter.
-	ed := editor{
+	srv := server{
 		serverURL:    serverURL,
 		editIDRegexp: regexp.MustCompile(regexp.QuoteMeta(serverURL) + `/edit/(\d+)\b`),
 	}
 
 	var err error
-	if ed.jar, err = cookiejar.New(nil); err != nil {
+	if srv.jar, err = cookiejar.New(nil); err != nil {
 		return nil, err
 	}
 
 	// We need to extract a few hidden CSRF-related inputs from the login form to avoid a
 	// "The form you’ve submitted has expired. Please resubmit your request." error.
-	b, err := ed.get(ctx, "/login")
+	b, err := srv.get(ctx, "/login")
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +85,7 @@ func newEditor(ctx context.Context, serverURL, user, pass string, opts ...editor
 		csrfToken = ms[1]
 	}
 
-	if b, err = ed.post(ctx, "/login", map[string]string{
+	if b, err = srv.post(ctx, "/login", map[string]string{
 		"csrf_session_key": csrfSessionKey,
 		"csrf_token":       csrfToken,
 		"username":         user,
@@ -107,36 +107,36 @@ func newEditor(ctx context.Context, serverURL, user, pass string, opts ...editor
 	}
 
 	// Apply options here so they don't affect login.
-	ed.limiter = rate.NewLimiter(maxQPS, 1)
+	srv.limiter = rate.NewLimiter(maxQPS, 1)
 	for _, opt := range opts {
-		opt(&ed)
+		opt(&srv)
 	}
 
-	return &ed, nil
+	return &srv, nil
 }
 
 // get sends a GET request for path and returns the response body.
-func (ed *editor) get(ctx context.Context, path string) ([]byte, error) {
-	return ed.send(ctx, http.MethodGet, path, nil)
+func (srv *server) get(ctx context.Context, path string) ([]byte, error) {
+	return srv.send(ctx, http.MethodGet, path, nil)
 }
 
 // post sends a POST request for path with the supplied URL-encoded parameters in the body
 // and returns the response body.
-func (ed *editor) post(ctx context.Context, path string, vals map[string]string) ([]byte, error) {
-	return ed.send(ctx, http.MethodPost, path, vals)
+func (srv *server) post(ctx context.Context, path string, vals map[string]string) ([]byte, error) {
+	return srv.send(ctx, http.MethodPost, path, vals)
 }
 
 // send sends a request for path with the supplied URL-encoded parameters as a body.
 // The response body is returned. All non-200 responses (after following redirects)
 // cause an error to be returned.
-func (ed *editor) send(ctx context.Context, method, path string, vals map[string]string) ([]byte, error) {
-	if ed.limiter != nil {
-		if err := ed.limiter.Wait(ctx); err != nil {
+func (srv *server) send(ctx context.Context, method, path string, vals map[string]string) ([]byte, error) {
+	if srv.limiter != nil {
+		if err := srv.limiter.Wait(ctx); err != nil {
 			return nil, err
 		}
 	}
 
-	u := ed.serverURL + path
+	u := srv.serverURL + path
 
 	var body io.Reader
 	if method == http.MethodPost {
@@ -144,13 +144,13 @@ func (ed *editor) send(ctx context.Context, method, path string, vals map[string
 		for k, v := range vals {
 			form.Set(k, v)
 		}
-		if ed.dryRun {
+		if srv.dryRun {
 			log.Printf("POST %v with body %q", u, form.Encode())
 			switch {
 			case path == "/relationship-editor":
 				return []byte(`{"edits":[{"edit_type":1,"response":1}]}`), nil
 			case strings.HasSuffix(path, "/edit"):
-				return []byte(ed.serverURL + "/edit/0"), nil // matched by editIDRegexp
+				return []byte(srv.serverURL + "/edit/0"), nil // matched by editIDRegexp
 			}
 			return nil, nil
 		}
@@ -161,21 +161,21 @@ func (ed *editor) send(ctx context.Context, method, path string, vals map[string
 	if err != nil {
 		return nil, err
 	}
-	for _, c := range ed.jar.Cookies(req.URL) {
+	for _, c := range srv.jar.Cookies(req.URL) {
 		req.AddCookie(c)
 	}
 	if method == http.MethodPost {
-		req.Header.Set("Origin", ed.serverURL)
+		req.Header.Set("Origin", srv.serverURL)
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
 
-	resp, err := ed.client.Do(req)
+	resp, err := srv.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	ed.jar.SetCookies(resp.Request.URL, resp.Cookies())
+	srv.jar.SetCookies(resp.Request.URL, resp.Cookies())
 
 	b, err := ioutil.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
@@ -246,8 +246,8 @@ func filterRels(rels []relInfo, entityType string) []relInfo {
 // getURLInfo fetches information about a URL (identified by its MBID).
 // TODO: Consider updating this to get info about arbitrary entity types.
 // Probably the only parts that need to change are the URL path and Decoded field.
-func (ed *editor) getURLInfo(ctx context.Context, mbid string) (*urlInfo, error) {
-	b, err := ed.get(ctx, "/url/"+mbid+"/edit")
+func (srv *server) getURLInfo(ctx context.Context, mbid string) (*urlInfo, error) {
+	b, err := srv.get(ctx, "/url/"+mbid+"/edit")
 	if err != nil {
 		return nil, err
 	}
