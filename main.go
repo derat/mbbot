@@ -158,70 +158,149 @@ func updateURL(ctx context.Context, ed *editor, mbid, editNote string,
 		for i := range info.rels {
 			oldRels[info.rels[i].id] = &info.rels[i]
 		}
-		vals := map[string]string{"rel-editor.edit_note": res.editNote}
-		if makeVotable {
-			vals["rel-editor.make_votable"] = "1"
-		}
+		vals := make(map[string]string)
 		for i, rel := range res.updatedRels {
-			log.Printf("%v: updating relationship %v (%q)", mbid, rel.id, rel.desc(info.url))
+			log.Printf("%v: editing relationship %v (%q)", mbid, rel.id, rel.desc(info.url))
 			pre := fmt.Sprintf("rel-editor.rels.%d.", i)
-			if err := setRelEditVals(vals, pre, oldRels[rel.id], &rel); err != nil {
+			if err := setRelEditVals(vals, pre, rel, oldRels[rel.id]); err != nil {
 				return err
 			}
 		}
-		b, err := ed.post(ctx, "/relationship-editor", vals)
-		if err != nil {
-			return fmt.Errorf("%v (%q)", err, b)
+		if ids, err := postRelEdit(ctx, ed, vals, res.editNote, makeVotable); err != nil {
+			return err
+		} else {
+			log.Printf("%v: edited %v relationship(s)", mbid, len(ids))
 		}
-		// This is written by submit_edits in lib/MusicBrainz/Server/Controller/WS/js/Edit.pm,
-		// which oddly doesn't include edit IDs.
-		var data struct {
-			Edits []struct {
-				EditType int `json:"edit_type"`
-				Response int `json:"response"`
-			} `json:"edits"`
+	}
+
+	for _, info := range res.newURLs {
+		vals := make(map[string]string)
+		for i, rel := range info.rels {
+			log.Printf("%v: adding relationship (%q)", mbid, rel.desc(info.url))
+			pre := fmt.Sprintf("rel-editor.rels.%d.", i)
+			if err := setRelEditVals(vals, pre, rel, nil); err != nil {
+				return err
+			}
+			// I think that the "normal" ordering sorts entities by type name, so we should use
+			// [artist,url], [recording,url], and [release,url], but [url,work]. So weird.
+			if (rel.backward && rel.targetType > "url") || (!rel.backward && rel.targetType < "url") {
+				return fmt.Errorf("incorrect direction for relationship %q", rel.desc(info.url))
+			}
+			urlPre, targetPre := pre+"entity.0", pre+"entity.1"
+			if rel.backward {
+				urlPre, targetPre = targetPre, urlPre
+			}
+			vals[urlPre+".url"] = info.url
+			vals[urlPre+".type"] = "url"
+			vals[targetPre+".gid"] = rel.targetMBID
+			vals[targetPre+".type"] = rel.targetType
 		}
-		if err := json.Unmarshal(b, &data); err != nil {
-			return fmt.Errorf("unmarshaling response: %v", err)
-		}
-		for i, ed := range data.Edits {
-			if ed.Response != 1 {
-				return fmt.Errorf("relationship edit %v with type %v failed: %v", i, ed.EditType, ed.Response)
+		if ids, err := postRelEdit(ctx, ed, vals, res.editNote, makeVotable); err != nil {
+			return err
+		} else {
+			for _, id := range ids {
+				log.Printf("%v: added relationship %v", mbid, id)
 			}
 		}
-		log.Printf("%v: created %v relationship edit(s)", mbid, len(data.Edits))
 	}
 
 	return nil
 }
 
-func setRelEditVals(vals map[string]string, pre string, orig, updated *relInfo) error {
+// setRelEditVals sets values needed by the /relationship-editor endpoint.
+// pre is prepended to each parameter name and should be e.g. "rel-editor.rels.0".
+// If orig is non-nil, an "edit" request is set with differences between orig and rel.
+// If orig is nil, an "add" request is set to create a new relationship.
+// The caller must set entity-related parameters when creating new relationships.
+func setRelEditVals(vals map[string]string, pre string, rel relInfo, orig *relInfo) error {
 	if orig == nil {
-		return fmt.Errorf("invalid rel %d", updated.id)
-	} else if *orig == *updated {
-		return fmt.Errorf("no changes for rel %d", updated.id)
+		if rel.id != 0 {
+			return fmt.Errorf("invalid rel %d", rel.id)
+		}
+	} else if rel == *orig {
+		return fmt.Errorf("no changes for rel %d", rel.id)
 	}
 
+	// These parameters are handled by lib/MusicBrainz/Server/Controller/RelationshipEditor.pm.
 	origCnt := len(vals)
-	if updated.linkTypeID != orig.linkTypeID {
-		vals[pre+"link_type"] = strconv.Itoa(updated.linkTypeID)
+	linkTypeKey := pre + "link_type"
+	if orig == nil || rel.linkTypeID != orig.linkTypeID {
+		vals[linkTypeKey] = strconv.Itoa(rel.linkTypeID)
 	}
-	if updated.ended != orig.ended {
-		vals[pre+"period.ended"] = fmt.Sprint(updated.ended) // "true" or "false"
+	// TODO: Support clearing dates too?
+	if !rel.beginDate.empty() && (orig == nil || rel.beginDate != orig.beginDate) {
+		vals[pre+"period.begin_date.year"] = strconv.Itoa(rel.beginDate.year)
+		vals[pre+"period.begin_date.month"] = strconv.Itoa(rel.beginDate.month)
+		vals[pre+"period.begin_date.day"] = strconv.Itoa(rel.beginDate.day)
 	}
-	if updated.endDate != orig.endDate {
-		vals[pre+"period.end_date.year"] = strconv.Itoa(updated.endDate.year)
-		vals[pre+"period.end_date.month"] = strconv.Itoa(updated.endDate.month)
-		vals[pre+"period.end_date.day"] = strconv.Itoa(updated.endDate.day)
+	if !rel.endDate.empty() && (orig == nil || rel.endDate != orig.endDate) {
+		vals[pre+"period.end_date.year"] = strconv.Itoa(rel.endDate.year)
+		vals[pre+"period.end_date.month"] = strconv.Itoa(rel.endDate.month)
+		vals[pre+"period.end_date.day"] = strconv.Itoa(rel.endDate.day)
+	}
+	if (orig == nil && rel.ended) || (orig != nil && rel.ended != orig.ended) {
+		vals[pre+"period.ended"] = boolToParam(rel.ended)
 	}
 	if len(vals) == origCnt {
-		return fmt.Errorf("unsupported update for rel (%+v -> %+v)", *orig, *updated)
+		return fmt.Errorf("unsupported update for rel (%+v)", rel)
 	}
 
 	// The server returns a 400 error if "action" and "link_type" are omitted.
-	vals[pre+"action"] = "edit"
-	vals[pre+"id"] = strconv.Itoa(updated.id)
-	vals[pre+"link_type"] = strconv.Itoa(updated.linkTypeID)
+	if orig == nil {
+		vals[pre+"action"] = "add"
+	} else {
+		vals[pre+"action"] = "edit"
+		vals[pre+"id"] = strconv.Itoa(rel.id)
+		if _, ok := vals[linkTypeKey]; !ok {
+			vals[linkTypeKey] = strconv.Itoa(rel.linkTypeID)
+		}
+	}
 
 	return nil
+}
+
+// postRelEdit posts vals to /relationship-editor.
+// IDs of created relationships are returned.
+// If existing relationships are edited, IDs are 0.
+func postRelEdit(ctx context.Context, ed *editor, vals map[string]string,
+	editNote string, makeVotable bool) ([]int, error) {
+	// Set additional parameters.
+	vals["rel-editor.edit_note"] = editNote
+	if makeVotable {
+		vals["rel-editor.make_votable"] = "1"
+	}
+
+	b, err := ed.post(ctx, "/relationship-editor", vals)
+	if err != nil {
+		return nil, fmt.Errorf("%v (%q)", err, b)
+	}
+	// The response is written by submit_edits in lib/MusicBrainz/Server/Controller/WS/js/Edit.pm,
+	// which oddly doesn't include the actual edit IDs.
+	var data struct {
+		Edits []struct {
+			RelationshipID int `json:"relationship_id"`
+			EditType       int `json:"edit_type"`
+			Response       int `json:"response"`
+		} `json:"edits"`
+	}
+	if err := json.Unmarshal(b, &data); err != nil {
+		return nil, fmt.Errorf("unmarshaling response: %v", err)
+	}
+	var ids []int
+	for i, ed := range data.Edits {
+		if ed.Response != 1 {
+			return ids, fmt.Errorf("relationship edit %v with type %v failed: %v", i, ed.EditType, ed.Response)
+		}
+		ids = append(ids, ed.RelationshipID)
+	}
+	return ids, nil
+}
+
+// boolToParam returns a string corresponding to v to use as a parameter passed to MusicBrainz.
+// boolean_from_json() in lib/MusicBrainz/Server/Data/Utils.pm seems to regrettably use Perl truthiness.
+func boolToParam(v bool) string {
+	if v {
+		return "1"
+	}
+	return "0"
 }

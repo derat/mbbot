@@ -4,19 +4,23 @@
 package main
 
 import (
+	"fmt"
 	"regexp"
 )
+
+// TODO: Rename this file to url.go and make everything URL-specific.
+// I don't think this code will end up being useful for rewriting anything else.
 
 // doRewrite looks for an appropriate rewrite for orig.
 // If orig isn't matched by a rewrite or is unchanged after rewriting, nil is returned.
 func doRewrite(rm rewriteMap, orig string, rels []relInfo) *rewriteResult {
 	for re, fn := range rm {
 		if ms := re.FindStringSubmatch(orig); ms != nil {
-			if res := fn(ms, rels); res == nil || (res.rewritten == orig && len(res.updatedRels) == 0) {
+			res := fn(ms, rels)
+			if res == nil || (res.rewritten == orig && len(res.updatedRels) == 0 && len(res.newURLs) == 0) {
 				return nil // unchanged
-			} else {
-				return res
 			}
+			return res
 		}
 	}
 	return nil
@@ -29,7 +33,8 @@ type rewriteFunc func(ms []string, rels []relInfo) *rewriteResult
 type rewriteResult struct {
 	rewritten   string    // rewritten original string
 	updatedRels []relInfo // relationships to update (others left unchanged)
-	editNote    string    // https://musicbrainz.org/doc/Edit_Note
+	newURLs     []urlInfo
+	editNote    string // https://musicbrainz.org/doc/Edit_Note
 }
 
 type rewriteMap map[*regexp.Regexp]rewriteFunc
@@ -38,17 +43,26 @@ const (
 	tidalEditNote      = "normalize Tidal streaming URLs: https://tickets.metabrainz.org/browse/MBBE-71"
 	geocitiesEditNote  = "end GeoCities relationships: https://tickets.metabrainz.org/browse/MBBE-47"
 	tidalStoreEditNote = "end Tidal Store relationships: https://tickets.metabrainz.org/browse/MBBE-63"
+	recmusicEditNote   = "convert RecMusic URLs to Tower Records Music: " +
+		"https://tickets.metabrainz.org/browse/MBBE-48, " +
+		"https://tickets.metabrainz.org/browse/MBBE-49"
 )
 
 var (
-	// See https://en.wikipedia.org/wiki/Yahoo!_GeoCities.
-	geocitiesEndDate      = date{2009, 10, 26}
+	geocitiesEndDate      = date{2009, 10, 26} // see https://en.wikipedia.org/wiki/Yahoo!_GeoCities
 	geocitiesJapanEndDate = date{2019, 3, 31}
-
-	tidalStoreEndDate = date{2022, 10, 20}
+	tidalStoreEndDate     = date{2022, 10, 20}
+	recmusicEndDate       = date{2021, 10, 1} // also music.tower.jp start date
 )
 
 var tidalAlbumTrackRegexp = regexp.MustCompile(`^/album/(\d+)/track/(\d+)$`)
+
+// missingTowerRecordsPairs contains [type, id] pairs for recmusic.jp URLs that don't work after
+// rewriting to music.tower.jp.
+var missingTowerRecordsPairs = map[[2]string]struct{}{
+	{"artist", "2001445271"}: struct{}{},
+	{"album", "1016070930"}:  struct{}{},
+}
 
 var urlRewrites = rewriteMap{
 	// MBBE-71: Normalize Tidal streaming URLs:
@@ -144,6 +158,47 @@ var urlRewrites = rewriteMap{
 		}
 		if len(res.updatedRels) == 0 {
 			return nil
+		}
+		return &res
+	},
+
+	// MBBE-48: Mark RecMusic links as ended
+	// MBBE-49: Migrate RecMusic URLs to Tower Records Music URLs
+	regexp.MustCompile(`^https?://` +
+		`recmusic\.jp/(?:[a-z][a-z]/)?` + // hostname plus optional country code ("sp/")
+		`(artist|album)/\?id=(\d+)` + // capture entity type and numeric ID
+		`$`): func(ms []string, rels []relInfo) *rewriteResult {
+		if len(rels) == 0 {
+			return nil
+		}
+
+		res := rewriteResult{
+			rewritten: ms[0], // leave the URL alone
+			editNote:  recmusicEditNote,
+		}
+
+		newURL := urlInfo{url: fmt.Sprintf("https://music.tower.jp/%s/detail/%s", ms[1], ms[2])}
+		for _, rel := range rels {
+			orig := rel
+			if !rel.ended {
+				rel.ended = true
+				rel.endDate = recmusicEndDate
+			}
+			if rel != orig {
+				res.updatedRels = append(res.updatedRels, rel)
+			}
+
+			if _, ok := missingTowerRecordsPairs[[2]string{ms[1], ms[2]}]; !ok {
+				newRel := orig
+				newRel.id = 0
+				newRel.beginDate = recmusicEndDate
+				newRel.endDate = date{}
+				newRel.ended = false
+				newURL.rels = append(newURL.rels, newRel)
+			}
+		}
+		if len(newURL.rels) > 0 {
+			res.newURLs = append(res.newURLs, newURL)
 		}
 		return &res
 	},

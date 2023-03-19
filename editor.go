@@ -206,14 +206,25 @@ type relInfo struct {
 
 type date struct{ year, month, day int }
 
+func (d *date) empty() bool { return d.year == 0 && d.month == 0 && d.day == 0 }
+
 // desc returns a string describing the relationship belonging to name,
 // e.g. "[name] has an official homepage at [url]".
 func (rel *relInfo) desc(name string) string {
+	target := rel.targetName
+	if target == "" {
+		target = rel.targetMBID
+	}
+	phrase := rel.linkPhrase + fmt.Sprintf("[%d]", rel.linkTypeID)
+
 	var s string
 	if rel.backward {
-		s = fmt.Sprintf("%s %s %s", name, rel.linkPhrase, rel.targetName)
+		s = fmt.Sprintf("%s %s %s", target, phrase, name)
 	} else {
-		s = fmt.Sprintf("%s %s %s", rel.targetName, rel.linkPhrase, name)
+		s = fmt.Sprintf("%s %s %s", name, phrase, target)
+	}
+	if !rel.beginDate.empty() {
+		s += fmt.Sprintf(" from %04d-%02d-%02d", rel.beginDate.year, rel.beginDate.month, rel.beginDate.day)
 	}
 	if rel.ended {
 		s += fmt.Sprintf(" until %04d-%02d-%02d", rel.endDate.year, rel.endDate.month, rel.endDate.day)
@@ -311,6 +322,7 @@ func (jr *jsonRelationship) toRelInfo() relInfo {
 		beginDate:  jr.BeginDate.toDate(),
 		endDate:    jr.EndDate.toDate(),
 		ended:      jr.Ended,
+		backward:   jr.Backward,
 		targetMBID: jr.Target.GID,
 		targetName: jr.Target.Name,
 		targetType: jr.Target.EntityType,
