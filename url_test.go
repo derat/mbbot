@@ -12,7 +12,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
-func TestUpdateURL(t *testing.T) {
+func TestProcessURL(t *testing.T) {
 	ctx := context.Background()
 	env := newTestEnv(ctx, t)
 	defer env.close()
@@ -45,8 +45,8 @@ func TestUpdateURL(t *testing.T) {
 	}
 
 	for _, mbid := range []string{tidalMBID, geocitiesMBID, tidalStoreMBID, recmusicMBID, doneMBID} {
-		if err := updateURL(ctx, env.srv, mbid, "", false); err != nil {
-			t.Errorf("updateURL(ctx, srv, %q, %q, false) failed: %v", mbid, "", err)
+		if err := processURL(ctx, env.srv, mbid, "", false); err != nil {
+			t.Errorf("processURL(ctx, srv, %q, %q, false) failed: %v", mbid, "", err)
 		}
 	}
 	want := []request{
@@ -132,7 +132,7 @@ func makeURLValues(m map[string]string) url.Values {
 	return vals
 }
 
-func TestDoRewrite(t *testing.T) {
+func TestRunURLFunc(t *testing.T) {
 	d := date{2003, 7, 9} // arbitrary
 
 	for _, tc := range []struct {
@@ -140,7 +140,7 @@ func TestDoRewrite(t *testing.T) {
 		rels        []relInfo
 		rewritten   string // rewritten URL; "" means no rewrite
 		updatedRels []relInfo
-		newURLs     []urlInfo
+		newURLs     []entityInfo
 	}{
 		{"https://www.example.org/", nil, "", nil, nil},
 		{"https://www.example.org/artist/123", nil, "", nil, nil},
@@ -195,40 +195,41 @@ func TestDoRewrite(t *testing.T) {
 		// RecMusic (MBBE-48) and Tower Records Music (MBBE-49)
 		{"https://recmusic.jp/album/?id=1010526534", nil, "", nil, nil}, // no relationships
 		{"https://recmusic.jp/album/?id=1010526534", []relInfo{{targetType: "release", linkTypeID: 980, ended: true, endDate: d}},
-			"", nil, []urlInfo{{"https://music.tower.jp/album/detail/1010526534", []relInfo{
-				{targetType: "release", linkTypeID: 980, beginDate: recmusicEndDate},
-			}}}}, // already ended
+			"", nil, []entityInfo{{
+				typ:  urlType,
+				name: "https://music.tower.jp/album/detail/1010526534",
+				rels: []relInfo{{targetType: "release", linkTypeID: 980, beginDate: recmusicEndDate}},
+			}}}, // already ended
 		{"https://recmusic.jp/artist/?id=2000017248", []relInfo{{targetType: "artist", linkTypeID: 978}},
 			"", []relInfo{{targetType: "artist", linkTypeID: 978, endDate: recmusicEndDate, ended: true}},
-			[]urlInfo{{"https://music.tower.jp/artist/detail/2000017248", []relInfo{
-				{targetType: "artist", linkTypeID: 978, beginDate: recmusicEndDate},
-			}}}},
+			[]entityInfo{{
+				typ:  urlType,
+				name: "https://music.tower.jp/artist/detail/2000017248",
+				rels: []relInfo{{targetType: "artist", linkTypeID: 978, beginDate: recmusicEndDate}},
+			}}},
 		{"https://recmusic.jp/artist/?id=2001445271", []relInfo{{targetType: "artist", linkTypeID: 978}},
 			"", []relInfo{{targetType: "artist", linkTypeID: 978, endDate: recmusicEndDate, ended: true}}, nil}, // no longer active
 	} {
 		if tc.rewritten == "" {
 			tc.rewritten = tc.url
 		}
-		res := doRewrite(urlRewrites, tc.url, tc.rels)
+		orig := entityInfo{name: tc.url, rels: tc.rels, typ: urlType}
+		res := runURLFunc(&orig)
 		if res == nil {
 			if tc.rewritten != tc.url || len(tc.updatedRels) > 0 || len(tc.newURLs) > 0 {
-				t.Errorf("doRewrite(urlRewrites, %q, %v) didn't rewrite; want %q, %v, %v",
-					tc.url, tc.rels, tc.rewritten, tc.updatedRels, tc.newURLs)
+				t.Errorf("runURLFunc(%v) didn't rewrite; want %q, %v, %v", orig, tc.rewritten, tc.updatedRels, tc.newURLs)
 			}
 			continue
 		}
 
 		if res.rewritten != tc.rewritten {
-			t.Errorf("doRewrite(urlRewrites, %q, %v) rewrote URL to %q; want %q",
-				tc.url, tc.rels, res.rewritten, tc.rewritten)
+			t.Errorf("runURLFunc(%v) rewrote URL to %q; want %q", orig, res.rewritten, tc.rewritten)
 		}
 		if !reflect.DeepEqual(res.updatedRels, tc.updatedRels) {
-			t.Errorf("doRewrite(urlRewrites, %q, %v) updated rels %v; want %v",
-				tc.url, tc.rels, res.updatedRels, tc.updatedRels)
+			t.Errorf("runURLFunc(%v) updated rels %v; want %v", orig, res.updatedRels, tc.updatedRels)
 		}
 		if !reflect.DeepEqual(res.newURLs, tc.newURLs) {
-			t.Errorf("doRewrite(urlRewrites, %q, %v) added URLs %v; want %v",
-				tc.url, tc.rels, res.newURLs, tc.newURLs)
+			t.Errorf("runURLFunc(%v) added URLs %v; want %v", orig, res.newURLs, tc.newURLs)
 		}
 	}
 }

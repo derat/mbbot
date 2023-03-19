@@ -157,8 +157,9 @@ func (env *testEnv) handleGet(w http.ResponseWriter, req *http.Request) {
 		}
 
 		var data jsonData
+		data.Stash.SourceEntity.GID = mbid
+		data.Stash.SourceEntity.EntityType = "url"
 		data.Stash.SourceEntity.Name = url
-		data.Stash.SourceEntity.Decoded = url
 		data.Stash.SourceEntity.Relationships = env.mbidRels[mbid]
 
 		io.WriteString(w, `<!DOCTYPE html><html><head>`)

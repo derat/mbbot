@@ -11,26 +11,26 @@ import (
 	"regexp"
 )
 
-// updateURL attempts to update the URL with the specified MBID.
+// processURL attempts to process the URL with the specified MBID.
 // If editNote is non-empty, it will be attached to the edit.
 // If makeVotable is true, voting will be forced.
 // If no updates are performed, a nil error is returned.
-func updateURL(ctx context.Context, srv *server, mbid, editNote string, makeVotable bool) error {
-	info, err := getURLInfo(ctx, srv, mbid)
+func processURL(ctx context.Context, srv *server, mbid, editNote string, makeVotable bool) error {
+	info, err := getEntityInfo(ctx, srv, mbid, urlType)
 	if err != nil {
 		return fmt.Errorf("failed getting URL: %v", err)
 	}
-	res := doRewrite(urlRewrites, info.url, info.rels)
+	res := runURLFunc(info)
 	if res == nil {
-		log.Printf("%v: no rewrites found for %v", mbid, info.url)
+		log.Printf("%v: no rewrites found for %v", mbid, info.name)
 		return nil
 	}
 	if editNote != "" {
 		res.editNote = editNote
 	}
 
-	if res.rewritten != "" && res.rewritten != info.url {
-		log.Printf("%v: rewriting %v to %v", mbid, info.url, res.rewritten)
+	if res.rewritten != "" && res.rewritten != info.name {
+		log.Printf("%v: rewriting %v to %v", mbid, info.name, res.rewritten)
 		vals := map[string]string{
 			"edit-url.url":       res.rewritten,
 			"edit-url.edit_note": res.editNote,
@@ -56,7 +56,7 @@ func updateURL(ctx context.Context, srv *server, mbid, editNote string, makeVota
 		}
 		vals := make(map[string]string)
 		for i, rel := range res.updatedRels {
-			log.Printf("%v: editing relationship %v (%q)", mbid, rel.id, rel.desc(info.url))
+			log.Printf("%v: editing relationship %v (%q)", mbid, rel.id, rel.desc(info.name))
 			pre := fmt.Sprintf("rel-editor.rels.%d.", i)
 			if err := setRelEditVals(vals, pre, rel, oldRels[rel.id]); err != nil {
 				return err
@@ -72,7 +72,7 @@ func updateURL(ctx context.Context, srv *server, mbid, editNote string, makeVota
 	for _, info := range res.newURLs {
 		vals := make(map[string]string)
 		for i, rel := range info.rels {
-			log.Printf("%v: adding relationship (%q)", mbid, rel.desc(info.url))
+			log.Printf("%v: adding relationship (%q)", mbid, rel.desc(info.name))
 			pre := fmt.Sprintf("rel-editor.rels.%d.", i)
 			if err := setRelEditVals(vals, pre, rel, nil); err != nil {
 				return err
@@ -80,13 +80,13 @@ func updateURL(ctx context.Context, srv *server, mbid, editNote string, makeVota
 			// I think that the "normal" ordering sorts entities by type name, so we should use
 			// [artist,url], [recording,url], and [release,url], but [url,work]. So weird.
 			if (rel.backward && rel.targetType > "url") || (!rel.backward && rel.targetType < "url") {
-				return fmt.Errorf("incorrect direction for relationship %q", rel.desc(info.url))
+				return fmt.Errorf("incorrect direction for relationship %q", rel.desc(info.name))
 			}
 			urlPre, targetPre := pre+"entity.0", pre+"entity.1"
 			if rel.backward {
 				urlPre, targetPre = targetPre, urlPre
 			}
-			vals[urlPre+".url"] = info.url
+			vals[urlPre+".url"] = info.name
 			vals[urlPre+".type"] = "url"
 			vals[targetPre+".gid"] = rel.targetMBID
 			vals[targetPre+".type"] = rel.targetType
@@ -103,13 +103,15 @@ func updateURL(ctx context.Context, srv *server, mbid, editNote string, makeVota
 	return nil
 }
 
-// doRewrite looks for an appropriate rewrite for orig.
-// If orig isn't matched by a rewrite or is unchanged after rewriting, nil is returned.
-func doRewrite(rm rewriteMap, orig string, rels []relInfo) *rewriteResult {
-	for re, fn := range rm {
-		if ms := re.FindStringSubmatch(orig); ms != nil {
-			res := fn(ms, rels)
-			if res == nil || (res.rewritten == orig && len(res.updatedRels) == 0 && len(res.newURLs) == 0) {
+// runURLFunc looks for an appropriate function in urlFuncs for the supplied URL.
+// If the URL isn't matched or is unchanged after processing, nil is returned.
+func runURLFunc(url *entityInfo) *urlResult {
+	for re, fn := range urlFuncs {
+		if ms := re.FindStringSubmatch(url.name); ms != nil {
+			cp := *url
+			cp.rels = append([]relInfo(nil), url.rels...)
+			res := fn(&cp, ms)
+			if res == nil || (res.rewritten == url.name && len(res.updatedRels) == 0 && len(res.newURLs) == 0) {
 				return nil // unchanged
 			}
 			return res
@@ -118,18 +120,16 @@ func doRewrite(rm rewriteMap, orig string, rels []relInfo) *rewriteResult {
 	return nil
 }
 
-// rewriteFunc accepts the match groups returned by FindStringSubmatch and returns
-// a rewritten string and updated relationships. nil may be returned to abort the rewrite.
-type rewriteFunc func(ms []string, rels []relInfo) *rewriteResult
+// urlFunc accepts the match groups returned by FindStringSubmatch and returns updates.
+// nil may be returned to abort processing.
+type urlFunc func(url *entityInfo, ms []string) *urlResult
 
-type rewriteResult struct {
-	rewritten   string    // rewritten original string
+type urlResult struct {
+	rewritten   string    // rewritten URL
 	updatedRels []relInfo // relationships to update (others left unchanged)
-	newURLs     []urlInfo
+	newURLs     []entityInfo
 	editNote    string // https://musicbrainz.org/doc/Edit_Note
 }
-
-type rewriteMap map[*regexp.Regexp]rewriteFunc
 
 const (
 	tidalEditNote      = "normalize Tidal streaming URLs: https://tickets.metabrainz.org/browse/MBBE-71"
@@ -156,22 +156,22 @@ var missingTowerRecordsPairs = map[[2]string]struct{}{
 	{"album", "1016070930"}:  struct{}{},
 }
 
-var urlRewrites = rewriteMap{
+var urlFuncs = map[*regexp.Regexp]urlFunc{
 	// MBBE-71: Normalize Tidal streaming URLs:
 	//  https://listen.tidal.com/album/114997210 -> https://tidal.com/album/114997210
 	//  https://listen.tidal.com/artist/11069    -> https://tidal.com/artist/11069
 	//  https://tidal.com/browse/album/11103031  -> https://tidal.com/album/11103031
 	//  https://tidal.com/browse/artist/5015356  -> https://tidal.com/artist/5015356
 	//  https://tidal.com/browse/track/120087531 -> https://tidal.com/track/120087531
-	//  (and many other forms; see TestDoRewrite_URL)
+	//  (and many other forms)
 	regexp.MustCompile(`^https?://` + // both http:// and https://
 		`(?:(?:desktop\.|desktop\.stage\.|listen\.|www\.)?tidal\.com)` + // hostname
 		`(?:/browse)?` + // optional /browse component
 		`(/(?:album|artist|track|video|album/\d+/track)/\d+)` + // match significant components, e.g. /album/123
 		`(?:/|\?.*)?` + // trailing slash or query
-		`$`): func(ms []string, rels []relInfo) *rewriteResult {
+		`$`): func(orig *entityInfo, ms []string) *urlResult {
 		p := ms[1]
-		res := rewriteResult{
+		res := urlResult{
 			rewritten: "https://tidal.com" + p,
 			editNote:  tidalEditNote,
 		}
@@ -180,9 +180,9 @@ var urlRewrites = rewriteMap{
 		// figure out what it should actually be.
 		if ms := tidalAlbumTrackRegexp.FindStringSubmatch(p); ms != nil {
 			album, track := ms[1], ms[2]
-			if len(filterRels(rels, "recording")) > 0 {
+			if len(filterRels(orig.rels, "recording")) > 0 {
 				res.rewritten = "https://tidal.com/track/" + track
-			} else if len(filterRels(rels, "release")) > 0 {
+			} else if len(filterRels(orig.rels, "release")) > 0 {
 				res.rewritten = "https://tidal.com/album/" + album
 			} else {
 				return nil // give up if it's related to neither
@@ -196,16 +196,16 @@ var urlRewrites = rewriteMap{
 	regexp.MustCompile(`^https?://` + // both http:// and https://
 		`(?:[-a-z0-9]+\.)?geocities\.(?:yahoo\.)?(com|jp|co\.jp)` + // hostname (capture TLD)
 		`/.*` + // all paths
-		`$`): func(ms []string, rels []relInfo) *rewriteResult {
-		res := rewriteResult{
-			rewritten: ms[0], // leave the URL alone
+		`$`): func(orig *entityInfo, ms []string) *urlResult {
+		res := urlResult{
+			rewritten: orig.name, // leave the URL alone
 			editNote:  geocitiesEditNote,
 		}
 		endDate := geocitiesEndDate
 		if ms[1] == "jp" || ms[1] == "co.jp" {
 			endDate = geocitiesJapanEndDate
 		}
-		for _, rel := range rels {
+		for _, rel := range orig.rels {
 			if !rel.ended {
 				rel.ended = true
 				rel.endDate = endDate
@@ -222,16 +222,16 @@ var urlRewrites = rewriteMap{
 	regexp.MustCompile(`^https?://` +
 		`(store\.tidal\.com|tidal\.com(/[a-zA-Z]{2})?/store)` +
 		`/.*` +
-		`$`): func(ms []string, rels []relInfo) *rewriteResult {
-		res := rewriteResult{
-			rewritten: ms[0], // leave the URL alone
+		`$`): func(orig *entityInfo, ms []string) *urlResult {
+		res := urlResult{
+			rewritten: orig.name, // leave the URL alone
 			editNote:  tidalStoreEditNote,
 		}
 		// TODO: The server returns an error if an edit would create a duplicate relationship
 		// (i.e. same link type, source, and target). This code could try to handle that case, but
 		// I've instead manually created edits to clean up the few URLs with multiple relationships.
-		for _, rel := range rels {
-			orig := rel
+		for _, rel := range orig.rels {
+			old := rel
 			switch rel.targetType {
 			case "artist":
 				rel.linkTypeID = 176 // "music can be purchased for download at"
@@ -244,7 +244,7 @@ var urlRewrites = rewriteMap{
 				rel.ended = true
 				rel.endDate = tidalStoreEndDate
 			}
-			if rel != orig {
+			if rel != old {
 				res.updatedRels = append(res.updatedRels, rel)
 			}
 		}
@@ -259,29 +259,32 @@ var urlRewrites = rewriteMap{
 	regexp.MustCompile(`^https?://` +
 		`recmusic\.jp/(?:[a-z][a-z]/)?` + // hostname plus optional country code ("sp/")
 		`(artist|album)/\?id=(\d+)` + // capture entity type and numeric ID
-		`$`): func(ms []string, rels []relInfo) *rewriteResult {
-		if len(rels) == 0 {
+		`$`): func(orig *entityInfo, ms []string) *urlResult {
+		if len(orig.rels) == 0 {
 			return nil
 		}
 
-		res := rewriteResult{
-			rewritten: ms[0], // leave the URL alone
+		res := urlResult{
+			rewritten: orig.name, // leave the URL alone
 			editNote:  recmusicEditNote,
 		}
 
-		newURL := urlInfo{url: fmt.Sprintf("https://music.tower.jp/%s/detail/%s", ms[1], ms[2])}
-		for _, rel := range rels {
-			orig := rel
+		newURL := entityInfo{
+			name: fmt.Sprintf("https://music.tower.jp/%s/detail/%s", ms[1], ms[2]),
+			typ:  urlType,
+		}
+		for _, rel := range orig.rels {
+			old := rel
 			if !rel.ended {
 				rel.ended = true
 				rel.endDate = recmusicEndDate
 			}
-			if rel != orig {
+			if rel != old {
 				res.updatedRels = append(res.updatedRels, rel)
 			}
 
 			if _, ok := missingTowerRecordsPairs[[2]string{ms[1], ms[2]}]; !ok {
-				newRel := orig
+				newRel := old
 				newRel.id = 0
 				newRel.beginDate = recmusicEndDate
 				newRel.endDate = date{}

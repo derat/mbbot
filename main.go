@@ -82,8 +82,8 @@ func main() {
 				break
 			} else if err != nil {
 				log.Fatal("Failed reading MBID: ", err)
-			} else if err := updateURL(ctx, srv, mbid, *editNote, *makeVotable); err != nil {
-				log.Printf("Failed rewriting %q: %v", mbid, err)
+			} else if err := processURL(ctx, srv, mbid, *editNote, *makeVotable); err != nil {
+				log.Printf("Failed processing %v: %v", mbid, err)
 			}
 		}
 	}

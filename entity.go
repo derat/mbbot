@@ -11,18 +11,23 @@ import (
 	"fmt"
 )
 
-// urlInfo describes a URL in the database.
-// TODO: Rename this to entityInfo and make it type-agnostic.
-type urlInfo struct {
-	url  string
+// entityInfo describes an entity in the database.
+type entityInfo struct {
+	mbid string
+	typ  entityType
+	name string // or URL
 	rels []relInfo
 }
 
-// getURLInfo fetches information about a URL (identified by its MBID) from srv.
-// TODO: Consider updating this to get info about arbitrary entity types.
-// Probably the only parts that need to change are the URL path and Decoded field.
-func getURLInfo(ctx context.Context, srv *server, mbid string) (*urlInfo, error) {
-	b, err := srv.get(ctx, "/url/"+mbid+"/edit")
+type entityType string
+
+const (
+	urlType entityType = "url"
+)
+
+// getEntityInfo fetches information about an entity (identified by its MBID) from srv.
+func getEntityInfo(ctx context.Context, srv *server, mbid string, typ entityType) (*entityInfo, error) {
+	b, err := srv.get(ctx, fmt.Sprintf("/%s/%s/edit", typ, mbid))
 	if err != nil {
 		return nil, err
 	}
@@ -47,10 +52,11 @@ func getURLInfo(ctx context.Context, srv *server, mbid string) (*urlInfo, error)
 		return nil, err
 	}
 	ent := &data.Stash.SourceEntity
-	if ent.Name != ent.Decoded {
-		return nil, fmt.Errorf("URLs don't match (name=%q, decoded=%q)", ent.Name, ent.Decoded)
+	info := entityInfo{
+		mbid: ent.GID,
+		typ:  entityType(ent.EntityType),
+		name: ent.Name,
 	}
-	info := urlInfo{url: ent.Decoded}
 	for _, rel := range ent.Relationships {
 		info.rels = append(info.rels, rel.toRelInfo())
 	}
@@ -61,9 +67,9 @@ func getURLInfo(ctx context.Context, srv *server, mbid string) (*urlInfo, error)
 type jsonData struct {
 	Stash struct {
 		SourceEntity struct {
-			// I have no idea which of this is the canonical URL, so check them both.
-			Name    string `json:"name"`
-			Decoded string `json:"decoded"`
+			GID        string `json:"gid"`
+			EntityType string `json:"entityType"`
+			Name       string `json:"name"`
 
 			Relationships []jsonRelationship `json:"relationships"`
 		} `json:"source_entity"`
