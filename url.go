@@ -138,7 +138,8 @@ const (
 	recmusicEditNote   = "convert RecMusic URLs to Tower Records Music: " +
 		"https://tickets.metabrainz.org/browse/MBBE-48, " +
 		"https://tickets.metabrainz.org/browse/MBBE-49"
-	operabaseEditNote = "normalize Operabase artist URLs: https://tickets.metabrainz.org/browse/MBBE-76"
+	operabaseEditNote  = "normalize Operabase artist URLs: https://tickets.metabrainz.org/browse/MBBE-76"
+	videogamInEditNote = "end Videogam.in relationships: https://tickets.metabrainz.org/browse/MBBE-77"
 )
 
 var (
@@ -146,6 +147,7 @@ var (
 	geocitiesJapanEndDate = date{2019, 3, 31}
 	tidalStoreEndDate     = date{2022, 10, 20}
 	recmusicEndDate       = date{2021, 10, 1} // also music.tower.jp start date
+	videogamInEndDate     = date{2017, 5, 0}
 )
 
 var tidalAlbumTrackRegexp = regexp.MustCompile(`^/album/(\d+)/track/(\d+)$`)
@@ -309,5 +311,24 @@ var urlFuncs = map[*regexp.Regexp]urlFunc{
 			rewritten: "https://operabase.com/artists/" + ms[1],
 			editNote:  operabaseEditNote,
 		}
+	},
+
+	// MBBE-77: Mark Videogam.in relationships as ended.
+	regexp.MustCompile(`^https?://videogam\.in/`): func(orig *entityInfo, ms []string) *urlResult {
+		res := urlResult{
+			rewritten: orig.name, // leave the URL alone
+			editNote:  videogamInEditNote,
+		}
+		for _, rel := range orig.rels {
+			if !rel.ended {
+				rel.ended = true
+				rel.endDate = videogamInEndDate
+				res.updatedRels = append(res.updatedRels, rel)
+			}
+		}
+		if len(res.updatedRels) == 0 {
+			return nil
+		}
+		return &res
 	},
 }

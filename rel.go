@@ -83,16 +83,23 @@ func setRelEditVals(vals map[string]string, pre string, rel relInfo, orig *relIn
 	if orig == nil || rel.linkTypeID != orig.linkTypeID {
 		vals[linkTypeKey] = strconv.Itoa(rel.linkTypeID)
 	}
-	// TODO: Support clearing dates too?
+
+	itoaNonZero := func(v int) string {
+		if v == 0 {
+			return ""
+		}
+		return strconv.Itoa(v)
+	}
+
 	if !rel.beginDate.empty() && (orig == nil || rel.beginDate != orig.beginDate) {
-		vals[pre+"period.begin_date.year"] = strconv.Itoa(rel.beginDate.year)
-		vals[pre+"period.begin_date.month"] = strconv.Itoa(rel.beginDate.month)
-		vals[pre+"period.begin_date.day"] = strconv.Itoa(rel.beginDate.day)
+		vals[pre+"period.begin_date.year"] = itoaNonZero(rel.beginDate.year)
+		vals[pre+"period.begin_date.month"] = itoaNonZero(rel.beginDate.month)
+		vals[pre+"period.begin_date.day"] = itoaNonZero(rel.beginDate.day)
 	}
 	if !rel.endDate.empty() && (orig == nil || rel.endDate != orig.endDate) {
-		vals[pre+"period.end_date.year"] = strconv.Itoa(rel.endDate.year)
-		vals[pre+"period.end_date.month"] = strconv.Itoa(rel.endDate.month)
-		vals[pre+"period.end_date.day"] = strconv.Itoa(rel.endDate.day)
+		vals[pre+"period.end_date.year"] = itoaNonZero(rel.endDate.year)
+		vals[pre+"period.end_date.month"] = itoaNonZero(rel.endDate.month)
+		vals[pre+"period.end_date.day"] = itoaNonZero(rel.endDate.day)
 	}
 	if (orig == nil && rel.ended) || (orig != nil && rel.ended != orig.ended) {
 		vals[pre+"period.ended"] = boolToParam(rel.ended)

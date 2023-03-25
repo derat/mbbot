@@ -22,6 +22,7 @@ func TestProcessURL(t *testing.T) {
 		geocitiesMBID  = "56313079-1796-4fb8-add5-d8cf117f3ba5"
 		tidalStoreMBID = "545eb1f2-630f-47ff-ad38-9b15e7c0cae9"
 		recmusicMBID   = "4e135691-fdc1-4127-ab69-67095aa09c44"
+		videogamInMBID = "db01c480-20bc-4094-b65a-4d73ff3cb273"
 		doneMBID       = "e9ce6782-29e6-4f09-82b0-0abd18061e32"
 
 		recmusicArtistMBID = "63a5c79f-697e-47e0-975d-1e2087a454aa"
@@ -31,6 +32,7 @@ func TestProcessURL(t *testing.T) {
 	env.mbidURLs[geocitiesMBID] = "http://www.geocities.com/user"
 	env.mbidURLs[tidalStoreMBID] = "https://store.tidal.com/artist/12345"
 	env.mbidURLs[recmusicMBID] = "https://recmusic.jp/album/?id=1010526534"
+	env.mbidURLs[videogamInMBID] = "http://videogam.in/people/Naoshi_Mizuta"
 	env.mbidURLs[doneMBID] = "https://tidal.com/album/1234" // already normalized
 
 	env.mbidRels[geocitiesMBID] = []jsonRelationship{
@@ -43,8 +45,18 @@ func TestProcessURL(t *testing.T) {
 	env.mbidRels[recmusicMBID] = []jsonRelationship{
 		{ID: 423, LinkTypeID: 980, Target: jsonTarget{EntityType: "release", GID: recmusicArtistMBID}, Backward: true},
 	}
+	env.mbidRels[videogamInMBID] = []jsonRelationship{
+		{ID: 321, LinkTypeID: 82, Target: jsonTarget{EntityType: "artist"}, Backward: true},
+	}
 
-	for _, mbid := range []string{tidalMBID, geocitiesMBID, tidalStoreMBID, recmusicMBID, doneMBID} {
+	for _, mbid := range []string{
+		tidalMBID,
+		geocitiesMBID,
+		tidalStoreMBID,
+		recmusicMBID,
+		videogamInMBID,
+		doneMBID,
+	} {
 		if err := processURL(ctx, env.srv, mbid, "", false); err != nil {
 			t.Errorf("processURL(ctx, srv, %q, %q, false) failed: %v", mbid, "", err)
 		}
@@ -116,6 +128,19 @@ func TestProcessURL(t *testing.T) {
 				"rel-editor.rels.0.entity.0.type":           "release",
 				"rel-editor.rels.0.entity.1.url":            "https://music.tower.jp/album/detail/1010526534",
 				"rel-editor.rels.0.entity.1.type":           "url",
+			}),
+		},
+		{
+			path: "/relationship-editor",
+			params: makeURLValues(map[string]string{
+				"rel-editor.edit_note":                    videogamInEditNote,
+				"rel-editor.rels.0.action":                "edit",
+				"rel-editor.rels.0.id":                    "321",
+				"rel-editor.rels.0.link_type":             "82",
+				"rel-editor.rels.0.period.ended":          "1",
+				"rel-editor.rels.0.period.end_date.day":   "", // unknown day
+				"rel-editor.rels.0.period.end_date.month": "5",
+				"rel-editor.rels.0.period.end_date.year":  "2017",
 			}),
 		},
 	}
@@ -214,6 +239,13 @@ func TestRunURLFunc(t *testing.T) {
 		{"https://operabase.com/artists/55012", nil, "", nil, nil}, // already canonicalized
 		{"https://operabase.com/a/frank-boonen/55012", nil, "https://operabase.com/artists/55012", nil, nil},
 		{"https://www.operabase.com/a/tobias-w%C3%B6gerer/93710", nil, "https://operabase.com/artists/93710", nil, nil},
+
+		// Videogam.in (MBBE-77)
+		{"http://videogam.in/music/?id=3TP-0032K", nil, "", nil, nil}, // no relationships
+		{"http://videogam.in/music/?id=3TP-0032K", []relInfo{{targetType: "artist", linkTypeID: 82, ended: true, endDate: d}},
+			"", nil, nil}, // already ended
+		{"http://videogam.in/music/?id=3TP-0032K", []relInfo{{targetType: "artist", linkTypeID: 82}},
+			"", []relInfo{{targetType: "artist", linkTypeID: 82, ended: true, endDate: videogamInEndDate}}, nil},
 	} {
 		if tc.rewritten == "" {
 			tc.rewritten = tc.url
