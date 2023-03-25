@@ -138,6 +138,7 @@ const (
 	recmusicEditNote   = "convert RecMusic URLs to Tower Records Music: " +
 		"https://tickets.metabrainz.org/browse/MBBE-48, " +
 		"https://tickets.metabrainz.org/browse/MBBE-49"
+	operabaseEditNote = "normalize Operabase artist URLs: https://tickets.metabrainz.org/browse/MBBE-76"
 )
 
 var (
@@ -296,5 +297,17 @@ var urlFuncs = map[*regexp.Regexp]urlFunc{
 			res.newURLs = append(res.newURLs, newURL)
 		}
 		return &res
+	},
+
+	// MBBE-76: Normalize Operabase artist URLs:
+	//  https://operabase.com/a/mathieu-romano/22190 -> https://operabase.com/artists/22190
+	regexp.MustCompile(`^https?://` +
+		`(?:(?:www\.)?operabase\.com)` +
+		`/a/[^/]+/(\d+)` + // skip /a/artist-name/ and capture trailing integer ID
+		`$`): func(orig *entityInfo, ms []string) *urlResult {
+		return &urlResult{
+			rewritten: "https://operabase.com/artists/" + ms[1],
+			editNote:  operabaseEditNote,
+		}
 	},
 }

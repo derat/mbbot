@@ -209,6 +209,11 @@ func TestRunURLFunc(t *testing.T) {
 			}}},
 		{"https://recmusic.jp/artist/?id=2001445271", []relInfo{{targetType: "artist", linkTypeID: 978}},
 			"", []relInfo{{targetType: "artist", linkTypeID: 978, endDate: recmusicEndDate, ended: true}}, nil}, // no longer active
+
+		// Operabase (MBBE-76)
+		{"https://operabase.com/artists/55012", nil, "", nil, nil}, // already canonicalized
+		{"https://operabase.com/a/frank-boonen/55012", nil, "https://operabase.com/artists/55012", nil, nil},
+		{"https://www.operabase.com/a/tobias-w%C3%B6gerer/93710", nil, "https://operabase.com/artists/93710", nil, nil},
 	} {
 		if tc.rewritten == "" {
 			tc.rewritten = tc.url
